@@ -24,6 +24,34 @@ interactive tool or provider CLI from a web request, worker, or cron job.
 GLM is structurally rejected from automatic route candidates. A configured key
 does not change that behavior.
 
+## Keeping in sync with the harness
+
+The committed
+`src/jainsons_llm_router/policies/harness_derived.py` file mirrors only the
+static routing facts in
+`$HOME/.claude/skills/harness-offload/harness.py`: backend/funding classes,
+model defaults, automatic-disable rules, and per-lane free candidate order. It
+does not import the harness or copy its runtime health, retry, or backoff logic.
+
+After any harness routing change, regenerate the policy:
+
+```bash
+python -m jainsons_llm_router.sync_from_harness
+```
+
+CI or a pre-commit hook can enforce that regeneration was not forgotten:
+
+```bash
+python -m jainsons_llm_router.sync_from_harness --check
+```
+
+`--check` exits 1 when the committed output has drifted. The live comparison is
+meaningful only on an org box where the harness path exists; generic
+GitHub-hosted runners run the fixture-backed sync tests and report the live
+check as an informational skip. Consuming repos use the generated free ordering
+with their own `Candidate` objects. Paid candidates, caps, approvals,
+adapter/account wiring, and exact-model pins remain local to each route.
+
 ## Install
 
 Until a private package registry is available, consume an immutable tag:

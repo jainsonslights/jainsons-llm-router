@@ -1,0 +1,44 @@
+name: Harness policy sync check
+
+on:
+  pull_request:
+
+jobs:
+  sync-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install package and test dependencies
+        run: python -m pip install -e '.[test]'
+
+      - name: Run fixture-backed sync tests and full suite
+        run: pytest
+
+      # harness.py is an org-box tool and is intentionally not copied into this
+      # package. Generic GitHub-hosted runners therefore cannot make the live
+      # comparison; fixture tests above remain blocking and this step reports an
+      # informational skip. On a runner where the harness is mounted at the
+      # standard path, the same PR workflow performs the real drift check.
+      - name: Detect live harness availability
+        id: live-harness
+        shell: bash
+        run: |
+          if [[ -f "$HOME/.claude/skills/harness-offload/harness.py" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Live harness unavailable; fixture tests are authoritative on this runner."
+          fi
+
+      - name: Check committed policy against live harness
+        if: steps.live-harness.outputs.available == 'true'
+        run: python -m jainsons_llm_router.sync_from_harness --check
+
+      - name: Report informational live-check skip
+        if: steps.live-harness.outputs.available != 'true'
+        run: echo "Informational only - live harness sync check skipped on generic runner."
