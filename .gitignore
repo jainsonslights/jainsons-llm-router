@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.harness-jobs/
+.harness_phase0_task.txt
+logs/
+.venv/
+build/
+dist/
