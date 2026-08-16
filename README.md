@@ -128,6 +128,14 @@ The file ledger is safe for concurrent processes on one host with one shared
 volume. It is not a cross-host authority. Multi-host paid deployments must use
 one shared ledger service or remain free-only.
 
+## Changelog
+
+### 0.3.0
+
+- Fixed FileLedger idempotency tracking to reject duplicate paid requests only
+  within the same configured budget day. Existing same-day protection is
+  unchanged; an identical request on a later budget day is now accepted.
+
 ## Adapter boundary
 
 Every adapter validates capability, estimates a bounded charge, sends sync and

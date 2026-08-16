@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from jainsons_llm_router import (
     BudgetCap,
     BudgetDenied,
     FileLedger,
+    IdempotencyConflict,
     LedgerUnavailable,
     ReservationSpec,
     hash_private_identifier,
@@ -132,3 +134,115 @@ def test_compaction_preserves_state_and_keeps_archive_chain(tmp_path):
         after.micro_usd_remaining,
     )
     assert ledger.diagnose()["healthy"]
+
+
+def _set_budget_day(monkeypatch, ledger, day: str) -> None:
+    monkeypatch.setattr(ledger, "_budget_day", lambda _now=None: day)
+
+
+def test_idempotency_key_is_rejected_on_the_same_budget_day(tmp_path, monkeypatch):
+    ledger = FileLedger.initialize(
+        tmp_path / "ledger",
+        spend_domain="domain",
+        caps=CAPS,
+        price_card_versions={"prices-v1"},
+        allowed_provider_accounts={"account"},
+    )
+    _set_budget_day(monkeypatch, ledger, "2026-04-01")
+    first = ledger.reserve(reservation_spec(1))
+    ledger.settle(first.reservation_id, actual_micro_usd=80)
+
+    with pytest.raises(IdempotencyConflict, match="idempotency key"):
+        ledger.reserve(reservation_spec(1))
+
+
+def test_idempotency_key_can_be_reused_on_a_later_budget_day(tmp_path, monkeypatch):
+    ledger = FileLedger.initialize(
+        tmp_path / "ledger",
+        spend_domain="domain",
+        caps=CAPS,
+        price_card_versions={"prices-v1"},
+        allowed_provider_accounts={"account"},
+    )
+    _set_budget_day(monkeypatch, ledger, "2026-04-01")
+    first = ledger.reserve(reservation_spec(1))
+    ledger.settle(first.reservation_id, actual_micro_usd=80)
+
+    _set_budget_day(monkeypatch, ledger, "2026-04-02")
+    second = ledger.reserve(reservation_spec(1))
+    assert second.budget_day == "2026-04-02"
+
+
+def test_idempotency_day_scope_survives_snapshot_and_journal_restart(tmp_path, monkeypatch):
+    directory = tmp_path / "ledger"
+    ledger = FileLedger.initialize(
+        directory,
+        spend_domain="domain",
+        caps=CAPS,
+        price_card_versions={"prices-v1"},
+        allowed_provider_accounts={"account"},
+    )
+    _set_budget_day(monkeypatch, ledger, "2026-04-01")
+    first = ledger.reserve(reservation_spec(1))
+    ledger.settle(first.reservation_id, actual_micro_usd=80)
+    ledger.compact(now=datetime(2026, 4, 1, tzinfo=timezone.utc))
+
+    restarted = FileLedger(
+        directory,
+        spend_domain="domain",
+        caps=CAPS,
+        price_card_versions={"prices-v1"},
+        allowed_provider_accounts={"account"},
+    )
+    _set_budget_day(monkeypatch, restarted, "2026-04-02")
+    second = restarted.reserve(reservation_spec(1))
+
+    replayed = FileLedger(
+        directory,
+        spend_domain="domain",
+        caps=CAPS,
+        price_card_versions={"prices-v1"},
+        allowed_provider_accounts={"account"},
+    )
+    _set_budget_day(monkeypatch, replayed, "2026-04-01")
+    with pytest.raises(IdempotencyConflict):
+        replayed.reserve(reservation_spec(1))
+    _set_budget_day(monkeypatch, replayed, "2026-04-02")
+    with pytest.raises(IdempotencyConflict):
+        replayed.reserve(reservation_spec(1))
+    assert second.budget_day == "2026-04-02"
+
+
+def test_compaction_prunes_terminal_idempotency_from_prior_days(tmp_path, monkeypatch):
+    directory = tmp_path / "ledger"
+    ledger = FileLedger.initialize(
+        directory,
+        spend_domain="domain",
+        caps=CAPS,
+        price_card_versions={"prices-v1"},
+        allowed_provider_accounts={"account"},
+    )
+    _set_budget_day(monkeypatch, ledger, "2026-04-01")
+    first = ledger.reserve(reservation_spec(1))
+    ledger.settle(first.reservation_id, actual_micro_usd=80)
+
+    _set_budget_day(monkeypatch, ledger, "2026-04-02")
+    second = ledger.reserve(reservation_spec(1))
+    ledger.settle(second.reservation_id, actual_micro_usd=80)
+    ledger.compact(now=datetime(2026, 4, 2, tzinfo=timezone.utc))
+
+    snapshot = ledger._read_snapshot()
+    assert set(snapshot["idempotency"]) == {"2026-04-02"}
+
+    restarted = FileLedger(
+        directory,
+        spend_domain="domain",
+        caps=CAPS,
+        price_card_versions={"prices-v1"},
+        allowed_provider_accounts={"account"},
+    )
+    _set_budget_day(monkeypatch, restarted, "2026-04-02")
+    with pytest.raises(IdempotencyConflict):
+        restarted.reserve(reservation_spec(1))
+    _set_budget_day(monkeypatch, restarted, "2026-04-03")
+    assert restarted.reserve(reservation_spec(1)).budget_day == "2026-04-03"
