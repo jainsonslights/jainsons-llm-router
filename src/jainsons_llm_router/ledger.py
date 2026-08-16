@@ -207,11 +207,43 @@ def _process_lock(path: Path) -> threading.RLock:
         return _PROCESS_LOCKS.setdefault(key, threading.RLock())
 
 
-def _new_state(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+def _new_state(
+    snapshot: Mapping[str, Any], *, legacy_idempotency_day: str | None = None
+) -> dict[str, Any]:
+    """Build mutable state, upgrading pre-0.3 idempotency snapshots in memory.
+
+    Version 0.2 stored ``idempotency`` as ``key_hash -> outcome``.  Version
+    0.3 stores ``budget_day -> key_hash -> outcome`` so the same key may be
+    used safely on a later cap day.  A live legacy reservation still carries
+    its budget day and can therefore be migrated exactly.  Terminal legacy
+    outcomes did not record one, so they are assigned to the snapshot day as
+    a conservative one-day compatibility window instead of blocking forever.
+    The next compaction writes only the day-indexed form.
+    """
+    live_reservations = json.loads(json.dumps(snapshot.get("live_reservations", {})))
+    raw_idempotency = json.loads(json.dumps(snapshot.get("idempotency", {})))
+    idempotency: dict[str, dict[str, Any]] = {}
+    for key_or_day, value in raw_idempotency.items():
+        if not isinstance(value, dict):
+            continue
+        if "status" not in value:
+            # Native 0.3 shape: budget_day -> key_hash -> outcome.
+            idempotency[key_or_day] = value
+            continue
+        # Legacy 0.2 shape: key_hash -> outcome.  The budget day is exact for
+        # live entries; settled legacy entries have no day in the old snapshot.
+        reservation = live_reservations.get(value.get("reservation_id"))
+        day = (
+            reservation.get("budget_day")
+            if isinstance(reservation, dict)
+            else value.get("budget_day", legacy_idempotency_day)
+        )
+        if isinstance(day, str):
+            idempotency.setdefault(day, {})[key_or_day] = value
     return {
         "totals": json.loads(json.dumps(snapshot.get("totals", {}))),
-        "live_reservations": json.loads(json.dumps(snapshot.get("live_reservations", {}))),
-        "idempotency": json.loads(json.dumps(snapshot.get("idempotency", {}))),
+        "live_reservations": live_reservations,
+        "idempotency": idempotency,
         "overage_blocked": bool(snapshot.get("overage_blocked", False)),
         "last_sequence": int(snapshot.get("checkpoint_sequence", 0)),
         "last_digest": str(snapshot.get("checkpoint_digest", GENESIS_DIGEST)),
@@ -410,7 +442,11 @@ class FileLedger:
 
     def _load_state(self) -> tuple[dict[str, Any], dict[str, Any]]:
         snapshot = self._read_snapshot()
-        state = _new_state(snapshot)
+        # Pre-0.3 terminal idempotency entries did not retain their budget
+        # day.  Snapshot mtime is the best available migration boundary for
+        # those entries; all new snapshots carry the day in their state key.
+        snapshot_time = datetime.fromtimestamp(self.snapshot_path.stat().st_mtime, timezone.utc)
+        state = _new_state(snapshot, legacy_idempotency_day=self._budget_day(snapshot_time))
         expected_sequence = state["last_sequence"] + 1
         previous_digest = state["last_digest"]
         for event in self._read_journal_events():
@@ -452,16 +488,18 @@ class FileLedger:
         reservation_id = event["reservation_id"]
         key_hash = event["idempotency_key_hash"]
         if event_type == "RESERVE":
-            if reservation_id in state["live_reservations"] or key_hash in state["idempotency"]:
+            day = event["budget_day"]
+            day_idempotency = state["idempotency"].setdefault(day, {})
+            if reservation_id in state["live_reservations"] or key_hash in day_idempotency:
                 raise LedgerUnavailable("duplicate reservation in journal")
             record = dict(event)
             state["live_reservations"][reservation_id] = record
-            state["idempotency"][key_hash] = {"status": "live", "reservation_id": reservation_id}
+            day_idempotency[key_hash] = {"status": "live", "reservation_id": reservation_id}
         elif event_type == "RELEASE":
             record = state["live_reservations"].pop(reservation_id, None)
             if record is None:
                 raise LedgerUnavailable("release references unknown reservation")
-            state["idempotency"].pop(record["idempotency_key_hash"], None)
+            self._remove_idempotency(state, record)
         elif event_type in {"SETTLE", "SETTLE_UNKNOWN"}:
             record = state["live_reservations"].pop(reservation_id, None)
             if record is None:
@@ -474,10 +512,12 @@ class FileLedger:
             ):
                 # A definitive zero-charge provider rejection is resolved and
                 # may fall through to the next explicitly listed paid sibling.
-                state["idempotency"].pop(record["idempotency_key_hash"], None)
+                self._remove_idempotency(state, record)
             else:
                 status = "unknown" if event_type == "SETTLE_UNKNOWN" else "settled"
-                state["idempotency"][record["idempotency_key_hash"]] = {
+                state["idempotency"].setdefault(record["budget_day"], {})[
+                    record["idempotency_key_hash"]
+                ] = {
                     "status": status,
                     "reservation_id": reservation_id,
                 }
@@ -488,15 +528,29 @@ class FileLedger:
             if record is None:
                 raise LedgerUnavailable("recovery references unknown reservation")
             if event["outcome"] == "released":
-                state["idempotency"].pop(record["idempotency_key_hash"], None)
+                self._remove_idempotency(state, record)
             elif event["outcome"] == "settled":
                 self._add_totals(state, event)
-                state["idempotency"][record["idempotency_key_hash"]] = {
+                state["idempotency"].setdefault(record["budget_day"], {})[
+                    record["idempotency_key_hash"]
+                ] = {
                     "status": "recovered",
                     "reservation_id": reservation_id,
                 }
             else:
                 raise LedgerUnavailable("unknown recovery outcome")
+
+    @staticmethod
+    def _remove_idempotency(state: dict[str, Any], record: Mapping[str, Any]) -> None:
+        """Remove one reservation's day-scoped idempotency entry."""
+
+        day = record["budget_day"]
+        day_idempotency = state["idempotency"].get(day)
+        if day_idempotency is None:
+            return
+        day_idempotency.pop(record["idempotency_key_hash"], None)
+        if not day_idempotency:
+            state["idempotency"].pop(day, None)
 
     def _base_event(self, state: Mapping[str, Any], event_type: str, record: Mapping[str, Any]) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -581,10 +635,10 @@ class FileLedger:
             _, state = self._load_state()
             if state["overage_blocked"]:
                 raise BudgetDenied("spend domain is blocked after an overage")
-            prior = state["idempotency"].get(spec.idempotency_key_hash)
+            day = self._budget_day()
+            prior = state["idempotency"].get(day, {}).get(spec.idempotency_key_hash)
             if prior is not None:
                 raise IdempotencyConflict(str(prior.get("status", "unknown")))
-            day = self._budget_day()
             for scope in spec.scopes:
                 cap = self.caps.get(scope)
                 if cap is None:
@@ -800,6 +854,25 @@ class FileLedger:
         }
 
     @staticmethod
+    def _prune_stale_idempotency(state: dict[str, Any], budget_day: str) -> None:
+        """Drop terminal duplicate markers from earlier cap days.
+
+        Old live reservations are retained for reconciliation even after their
+        cap day ends.  Their day-specific marker remains necessary so a later
+        settlement or release can update the correct state bucket.
+        """
+
+        for day in tuple(state["idempotency"]):
+            if day >= budget_day:
+                continue
+            day_idempotency = state["idempotency"][day]
+            for key_hash, record in tuple(day_idempotency.items()):
+                if record.get("status") != "live":
+                    day_idempotency.pop(key_hash)
+            if not day_idempotency:
+                state["idempotency"].pop(day)
+
+    @staticmethod
     def _fsync_directory(path: Path) -> None:
         flags = os.O_RDONLY
         if hasattr(os, "O_DIRECTORY"):
@@ -838,6 +911,7 @@ class FileLedger:
 
         with self._exclusive():
             _, state = self._load_state()
+            self._prune_stale_idempotency(state, self._budget_day(now))
             checkpoint = self._base_event(state, "CHECKPOINT", {"outcome": "checkpoint"})
             self._append_event(state, checkpoint)
             self._atomic_write_snapshot(self._snapshot_from_state(state))

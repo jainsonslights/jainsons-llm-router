@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jainsons-llm-router"
-version = "0.2.0"
+version = "0.3.0"
 description = "Policy-controlled, budget-aware in-process LLM routing for Jainsons services"
 readme = "README.md"
 requires-python = ">=3.10"
