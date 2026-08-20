@@ -12,6 +12,7 @@ from .adapters import (
     PriceCard,
     ProviderAdapter,
 )
+from .client import complete_text
 from .errors import (
     BudgetDenied,
     ConfigurationError,
@@ -118,6 +119,7 @@ __all__ = [
     "UsageLedger",
     "UseRoute",
     "create_router",
+    "complete_text",
     "hash_private_identifier",
 ]
 
