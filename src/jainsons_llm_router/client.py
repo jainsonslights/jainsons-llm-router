@@ -85,6 +85,16 @@ class _FreeOnlyLedger:
         self._deny()
 
 
+def lane_primary_backend(lane: str) -> str:
+    """Return the primary backend the harness policy assigns to *lane* (e.g. vision -> agy).
+
+    Lets callers resolve a capability's model from the harness-mirrored registry
+    instead of a per-repo env var. Falls back to None when unknown.
+    """
+    order = free_candidate_backend_order(lane)
+    return order[0] if order else None
+
+
 def _lane_candidates(lane: str) -> tuple[Candidate, ...]:
     """Resolve a lane to ordered, explicitly free harness candidates."""
 

@@ -342,6 +342,8 @@ def _classify_kind(name: str, kind: str, api_backends: frozenset[str]) -> tuple[
         return "subscription", "free"
     if kind in {"or-free", "omni-free"}:
         return "free_service", "free"
+    if kind == "media":
+        return "free_service", "free"  # local capability service (e.g. OCR via harness_media.py)
     raise HarnessSyncError(
         f"backend {name!r} has unknown kind {kind!r}; update the sync classifier explicitly"
     )

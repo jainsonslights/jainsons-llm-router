@@ -25,7 +25,7 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = '4cd593a2c9acecb3129c8caa3d124b1c45d4986f1c886386e7a6ef73fd04fc72'
+HARNESS_POLICY_SHA256 = '2e2b479c353902f6482d6bc07fb5cd5edc1e26f8fb7c30130e458e51a43c5bfb'
 DEFAULT_LANE = 'research'
 AUTO_DISABLED_BACKENDS = frozenset(('glm', 'kimi'))
 GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS
@@ -35,6 +35,11 @@ BACKENDS = MappingProxyType({
         name='agy', kind='sub-free', funding='subscription',
         billing_class=BillingClass.FREE, model=None,
         model_source='provider-default', automatic_enabled=True,
+    ),
+    'agy-pro': HarnessBackendPolicy(
+        name='agy-pro', kind='sub-free', funding='subscription',
+        billing_class=BillingClass.FREE, model='gemini-3.1-pro-high',
+        model_source="'gemini-3.1-pro-high'", automatic_enabled=True,
     ),
     'claude': HarnessBackendPolicy(
         name='claude', kind='sub-anthropic', funding='subscription',
@@ -75,6 +80,11 @@ BACKENDS = MappingProxyType({
         name='kimi', kind='sub-kimi', funding='subscription',
         billing_class=BillingClass.FREE, model='k3[1m]',
         model_source="BACKEND_ENV['kimi'].ANTHROPIC_DEFAULT_SONNET_MODEL (KIMI_MODEL)", automatic_enabled=False,
+    ),
+    'media_ocr': HarnessBackendPolicy(
+        name='media_ocr', kind='media', funding='free_service',
+        billing_class=BillingClass.FREE, model=None,
+        model_source='provider-default', automatic_enabled=True,
     ),
     'omni-audit': HarnessBackendPolicy(
         name='omni-audit', kind='omni-free', funding='free_service',
@@ -132,7 +142,8 @@ LANE_BACKEND_ORDER = MappingProxyType({
     'code': ('codex', 'agy'),
     'domain_ops': ('agy', 'codex'),
     'image_gen': ('agy', 'agy'),
-    'legal_finance': ('claude', 'codex'),
+    'legal_finance': ('claude', 'claude'),
+    'ocr': ('media_ocr', 'media_ocr'),
     'planning': ('claude', 'codex'),
     'research': ('agy', 'codex'),
     'ui': ('codex', 'agy'),
@@ -144,7 +155,8 @@ FREE_CANDIDATE_BACKENDS_BY_LANE = MappingProxyType({
     'code': ('codex', 'agy'),
     'domain_ops': ('agy', 'codex'),
     'image_gen': ('agy',),
-    'legal_finance': ('claude', 'codex'),
+    'legal_finance': ('claude',),
+    'ocr': ('media_ocr',),
     'planning': ('claude', 'codex'),
     'research': ('agy', 'codex'),
     'ui': ('codex', 'agy'),
