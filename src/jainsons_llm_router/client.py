@@ -59,6 +59,18 @@ _MAX_ROUTE_OUTPUT_TOKENS = 1_000_000
 _SPECIAL_CAPABILITY_LANES = frozenset({"image_gen", "vision"})
 
 
+def _maybe_apply_rlm(prompt: str) -> str:
+    """Auto-augment ``prompt`` with large-data reading guidance when the
+    task appears to involve large data. Fails soft to the original prompt
+    on any error -- this must never block or alter routing behaviour."""
+    try:
+        from .rlm import maybe_inject_rlm_nudge
+
+        return maybe_inject_rlm_nudge(prompt)
+    except Exception:  # noqa: BLE001 - RLM augmentation is advisory only
+        return prompt
+
+
 class _FreeOnlyLedger:
     """Fail closed if a free-only route ever reaches a money-ledger path."""
 
@@ -234,6 +246,8 @@ def complete_text(
 
     if not isinstance(prompt, str) or not prompt:
         raise ValueError("prompt must be a non-empty string")
+
+    prompt = _maybe_apply_rlm(prompt)
 
     # Resolve the requested lane before constructing the shared router.  This
     # keeps unknown and special-capability errors precise and network-free.
