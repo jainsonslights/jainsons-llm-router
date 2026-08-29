@@ -25,9 +25,9 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = '79c4e85221e87be7d222c8cabf6e52d5fb559f1173eb54b3248f52bb1d1c8962'
+HARNESS_POLICY_SHA256 = 'd3eacc6bdf8f8877a5f1909af6a3ea783a29234808ec8f01f300ea174437ae25'
 DEFAULT_LANE = 'research'
-AUTO_DISABLED_BACKENDS = frozenset(('glm',))
+AUTO_DISABLED_BACKENDS = frozenset(('glm', 'kimi'))
 GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS
 
 BACKENDS = MappingProxyType({
@@ -69,7 +69,7 @@ BACKENDS = MappingProxyType({
     'kimi': HarnessBackendPolicy(
         name='kimi', kind='sub-kimi', funding='subscription',
         billing_class=BillingClass.FREE, model='k3[1m]',
-        model_source="BACKEND_ENV['kimi'].ANTHROPIC_DEFAULT_SONNET_MODEL (KIMI_MODEL)", automatic_enabled=True,
+        model_source="BACKEND_ENV['kimi'].ANTHROPIC_DEFAULT_SONNET_MODEL (KIMI_MODEL)", automatic_enabled=False,
     ),
     'omni-audit': HarnessBackendPolicy(
         name='omni-audit', kind='omni-free', funding='free_service',
@@ -136,13 +136,13 @@ LANE_BACKEND_ORDER = MappingProxyType({
 })
 
 FREE_CANDIDATE_BACKENDS_BY_LANE = MappingProxyType({
-    'code': ('codex', 'kimi'),
+    'code': ('codex',),
     'domain_ops': ('agy', 'codex'),
     'image_gen': ('agy',),
     'legal_finance': ('claude', 'codex'),
     'planning': ('claude', 'codex'),
     'research': ('agy', 'codex'),
-    'ui': ('kimi', 'codex'),
+    'ui': ('codex',),
     'vision': ('agy',),
     'writing': ('codex', 'agy'),
 })
