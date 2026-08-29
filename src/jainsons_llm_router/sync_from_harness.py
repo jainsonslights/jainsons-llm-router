@@ -101,6 +101,8 @@ class HarnessPolicyFacts:
 class _StaticEvaluator:
     """Evaluate only the literal subset used by the harness policy symbols."""
 
+    _NO_STATIC_MATCH = object()
+
     def __init__(self, assignments: Mapping[str, ast.expr]) -> None:
         self.assignments = dict(assignments)
         self._active: set[str] = set()
@@ -109,11 +111,11 @@ class _StaticEvaluator:
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.List):
-            return [self.value(item) for item in node.elts]
+            return self._expand_literal_elements(node.elts)
         if isinstance(node, ast.Tuple):
-            return tuple(self.value(item) for item in node.elts)
+            return tuple(self._expand_literal_elements(node.elts))
         if isinstance(node, ast.Set):
-            return {self.value(item) for item in node.elts}
+            return set(self._expand_literal_elements(node.elts))
         if isinstance(node, ast.Dict):
             if any(key is None for key in node.keys):
                 raise HarnessSyncError("static policy dicts cannot use unpacking")
@@ -132,6 +134,9 @@ class _StaticEvaluator:
                 return self.value(self.assignments[node.id])
             finally:
                 self._active.remove(node.id)
+        flattened = self._dict_values_flattening_call(node)
+        if flattened is not self._NO_STATIC_MATCH:
+            return flattened
         if self._is_environ_get(node):
             call = node
             assert isinstance(call, ast.Call)
@@ -142,6 +147,76 @@ class _StaticEvaluator:
             return self.value(call.args[1])
         raise HarnessSyncError(
             f"unsupported static policy expression: {ast.dump(node, include_attributes=False)}"
+        )
+
+    def _expand_literal_elements(self, elements: list[ast.expr]) -> list[Any]:
+        """Evaluate a static container literal, including explicit starred collections."""
+
+        result: list[Any] = []
+        for item in elements:
+            if isinstance(item, ast.Starred):
+                expanded = self.value(item.value)
+                if not isinstance(expanded, (list, tuple, set, frozenset)):
+                    raise HarnessSyncError(
+                        "static starred policy expression must resolve to a list, tuple, set, or frozenset"
+                    )
+                result.extend(expanded)
+            else:
+                result.append(self.value(item))
+        return result
+
+    def _dict_values_flattening_call(self, node: ast.expr) -> Any:
+        """Recognize the exact static dict-values flattening generator contract."""
+
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"frozenset", "set", "tuple", "list"}
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], ast.GeneratorExp)
+        ):
+            return self._NO_STATIC_MATCH
+
+        generator = node.args[0]
+        if len(generator.generators) != 2:
+            return self._NO_STATIC_MATCH
+        outer, inner = generator.generators
+        if (
+            outer.is_async
+            or inner.is_async
+            or outer.ifs
+            or inner.ifs
+            or not isinstance(outer.target, ast.Name)
+            or not isinstance(inner.target, ast.Name)
+            or not isinstance(generator.elt, ast.Name)
+            or generator.elt.id != inner.target.id
+            or not isinstance(inner.iter, ast.Name)
+            or inner.iter.id != outer.target.id
+            or not isinstance(outer.iter, ast.Call)
+            or outer.iter.args
+            or outer.iter.keywords
+            or not isinstance(outer.iter.func, ast.Attribute)
+            or outer.iter.func.attr != "values"
+        ):
+            return self._NO_STATIC_MATCH
+
+        mapping = self.value(outer.iter.func.value)
+        if not isinstance(mapping, dict):
+            raise HarnessSyncError(
+                "static dict-values generator source must resolve to a dict"
+            )
+
+        flattened: list[Any] = []
+        for key, value in mapping.items():
+            if not isinstance(value, (list, tuple, set, frozenset)):
+                raise HarnessSyncError(
+                    "static dict-values generator value for "
+                    f"key {key!r} must resolve to a list, tuple, set, or frozenset; got {value!r}"
+                )
+            flattened.extend(value)
+        return {"frozenset": frozenset, "set": set, "tuple": tuple, "list": list}[node.func.id](
+            flattened
         )
 
     @staticmethod

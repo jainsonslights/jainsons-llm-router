@@ -71,18 +71,18 @@ def test_runtime_only_harness_changes_do_not_change_generated_policy() -> None:
 
 def test_generated_helper_applies_order_and_requires_explicit_missing_acknowledgement() -> None:
     codex = _free_candidate("codex")
-    agy = _free_candidate("agy")
-    assert order_free_candidates("code", {"agy": agy, "codex": codex}) == (codex, agy)
+    kimi = _free_candidate("kimi")
+    assert order_free_candidates("code", {"codex": codex, "kimi": kimi}) == (codex, kimi)
 
     with pytest.raises(ConfigurationError, match="missing harness-derived"):
         order_free_candidates("code", {"codex": codex})
-    assert order_free_candidates("code", {"codex": codex}, allow_missing={"agy"}) == (codex,)
+    assert order_free_candidates("code", {"codex": codex}, allow_missing={"kimi"}) == (codex,)
 
 
 def test_generated_live_snapshot_preserves_glm_off_and_lane_order() -> None:
     assert GLM_AUTOMATIC_DISABLED
     assert BACKENDS["glm"].automatic_enabled is False
-    assert FREE_CANDIDATE_BACKENDS_BY_LANE["code"] == ("codex", "agy")
+    assert FREE_CANDIDATE_BACKENDS_BY_LANE["code"] == ("codex", "kimi")
 
 
 def test_check_mode_detects_drift_without_real_harness(tmp_path: Path, capsys) -> None:
@@ -112,6 +112,67 @@ def test_missing_referenced_model_symbol_fails_loudly() -> None:
     )
     with pytest.raises(HarnessSyncError, match="CODEX_MODEL.*not assigned"):
         parse_harness_source(source, filename="missing_model_symbol_harness.py")
+
+
+def test_starred_static_set_expands_a_resolved_frozenset() -> None:
+    source = FIXTURE.read_text(encoding="utf-8").replace(
+        'AUTO_DISABLED_BACKENDS = {"glm", "kimi"}',
+        '\n'.join(
+            (
+                'STATIC_FALLBACK_TIERS = {"only": ("kimi",)}',
+                'STATIC_FALLBACK_BACKENDS = frozenset(',
+                '    backend for tier in STATIC_FALLBACK_TIERS.values() for backend in tier',
+                ')',
+                'AUTO_DISABLED_BACKENDS = {"glm", *STATIC_FALLBACK_BACKENDS}',
+            )
+        ),
+    )
+
+    facts = parse_harness_source(source, filename="starred_set_harness.py")
+
+    assert facts.auto_disabled_backends == frozenset({"glm", "kimi"})
+
+
+def test_dict_values_flattening_generator_resolves_manual_fallbacks() -> None:
+    source = FIXTURE.read_text(encoding="utf-8").replace(
+        'AUTO_DISABLED_BACKENDS = {"glm", "kimi"}',
+        '\n'.join(
+            (
+                'CLAUDE_CODE_FALLBACK_TIERS = {"first": ("kimi",), "second": ("codex",)}',
+                'MANUAL_FALLBACK_BACKENDS = frozenset(',
+                '    backend for tier in CLAUDE_CODE_FALLBACK_TIERS.values() for backend in tier',
+                ')',
+                'AUTO_DISABLED_BACKENDS = {"glm", *MANUAL_FALLBACK_BACKENDS}',
+            )
+        ),
+    )
+
+    facts = parse_harness_source(source, filename="flattening_generator_harness.py")
+
+    assert facts.auto_disabled_backends == frozenset({"glm", "kimi", "codex"})
+
+
+@pytest.mark.parametrize(
+    "generator",
+    (
+        'backend for tier in CLAUDE_CODE_FALLBACK_TIERS.values() if tier for backend in tier',
+        'backend for groups in CLAUDE_CODE_FALLBACK_TIERS.values() for tier in groups for backend in tier',
+    ),
+)
+def test_nonmatching_dict_values_generators_fail_loudly(generator: str) -> None:
+    source = FIXTURE.read_text(encoding="utf-8").replace(
+        'AUTO_DISABLED_BACKENDS = {"glm", "kimi"}',
+        '\n'.join(
+            (
+                'CLAUDE_CODE_FALLBACK_TIERS = {"first": (("kimi",),)}',
+                f'MANUAL_FALLBACK_BACKENDS = frozenset({generator})',
+                'AUTO_DISABLED_BACKENDS = {"glm", *MANUAL_FALLBACK_BACKENDS}',
+            )
+        ),
+    )
+
+    with pytest.raises(HarnessSyncError, match="unsupported static policy expression"):
+        parse_harness_source(source, filename="nonmatching_generator_harness.py")
 
 
 def test_enabling_glm_requires_human_router_review() -> None:
