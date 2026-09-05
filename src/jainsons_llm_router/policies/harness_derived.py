@@ -25,7 +25,7 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = 'd3eacc6bdf8f8877a5f1909af6a3ea783a29234808ec8f01f300ea174437ae25'
+HARNESS_POLICY_SHA256 = 'a04849679987e773913f8c3c750b927eaa9816618b939cb125772c9bd58be665'
 DEFAULT_LANE = 'research'
 AUTO_DISABLED_BACKENDS = frozenset(('glm', 'kimi'))
 GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS
@@ -50,6 +50,11 @@ BACKENDS = MappingProxyType({
         name='codex', kind='sub', funding='subscription',
         billing_class=BillingClass.FREE, model='gpt-5.6-terra',
         model_source='CODEX_MODEL', automatic_enabled=True,
+    ),
+    'codex-astra': HarnessBackendPolicy(
+        name='codex-astra', kind='sub', funding='subscription',
+        billing_class=BillingClass.FREE, model='gpt-6-astra',
+        model_source="'gpt-6-astra'", automatic_enabled=True,
     ),
     'codex-luna': HarnessBackendPolicy(
         name='codex-luna', kind='sub', funding='subscription',
