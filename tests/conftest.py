@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import socket
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +15,37 @@ from jainsons_llm_router import (
     LLMRequest,
     PaidApproval,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_tests_from_credentials_and_network(tmp_path, monkeypatch):
+    """Keep tests from reading real credentials or reaching non-loopback hosts."""
+
+    for name in tuple(os.environ):
+        if name in {"DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "LLM_DEEPSEEK_KEY"} or name.startswith(
+            "JAINSONS_LLM_ROUTER_"
+        ):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    real_create_connection = socket.create_connection
+    real_socket_connect = socket.socket.connect
+    loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+
+    def guarded_create_connection(address, *args, **kwargs):
+        host = address[0]
+        if host not in loopback_hosts:
+            raise RuntimeError("network blocked in tests")
+        return real_create_connection(address, *args, **kwargs)
+
+    def guarded_socket_connect(sock, address):
+        # Unix-domain socket addresses are filesystem paths rather than hosts.
+        if isinstance(address, tuple) and address[0] not in loopback_hosts:
+            raise RuntimeError("network blocked in tests")
+        return real_socket_connect(sock, address)
+
+    monkeypatch.setattr(socket, "create_connection", guarded_create_connection)
+    monkeypatch.setattr(socket.socket, "connect", guarded_socket_connect)
 
 
 @pytest.fixture

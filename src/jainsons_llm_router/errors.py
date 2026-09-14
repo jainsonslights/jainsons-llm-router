@@ -38,6 +38,12 @@ class BudgetDenied(RouterError):
     code = "budget_denied"
 
 
+class BudgetExhausted(BudgetDenied):
+    """An application lane has exhausted its owner-approved daily cap."""
+
+    code = "budget_exhausted"
+
+
 class LedgerUnavailable(RouterError):
     """The ledger cannot safely authorize paid dispatch."""
 
@@ -72,4 +78,3 @@ class ConfigurationError(RouterError):
     """Router policy is unsafe or internally inconsistent."""
 
     code = "configuration_error"
-

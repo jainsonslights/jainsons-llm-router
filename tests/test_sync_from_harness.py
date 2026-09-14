@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from jainsons_llm_router import BillingClass, Candidate
+from jainsons_llm_router.runtime_policy import canonical_app_policy_sha256
 from jainsons_llm_router import sync_from_harness as sync_module
 from jainsons_llm_router.policies import harness_derived
 
@@ -36,7 +37,16 @@ def fixture_export() -> dict[str, object]:
         lanes[lane] = {"primary": "codex", "fallback": "agy", "escalation_chain": ["codex", "or-free-ling"], "http_chain": ["or-free-ling"]}
     for lane in ("planning", "domain_ops", "legal_finance"):
         lanes[lane] = {"primary": "codex", "fallback": "agy", "escalation_chain": ["codex", "agy"], "http_chain": []}
-    return {"schema": 1, "default_lane": "research", "openrouter_free_backends": list(free), "free_check": {"function": "openrouter_free_catalog._openrouter_model_is_free", "source_sha256": "fixture-free-check-hash"}, "backends": backends, "lanes": lanes}
+    app_backends = {
+        "app-only": {
+            "kind": "app-metered",
+            "model": "deepseek-flash",
+            "transport": {"endpoint": "https://api.deepseek.com/chat/completions", "allowed_host": "api.deepseek.com", "key_env": "DEEPSEEK_API_KEY", "dialect": "openai-chat-completions", "payload_defaults": {}},
+            "price_card": {"version": "app-prices", "input": 0.3, "output": 1.2},
+        }
+    }
+    app_lanes = {"chat_fast": {"backend_chain": ["app-only"], "max_output_tokens": 10, "max_input_chars": 10, "max_deadline_seconds": 10, "daily_cap_usd": 1}}
+    return {"schema": 1, "default_lane": "research", "openrouter_free_backends": list(free), "free_check": {"function": "openrouter_free_catalog._openrouter_model_is_free", "source_sha256": "fixture-free-check-hash"}, "backends": backends, "lanes": lanes, "app_backends": app_backends, "app_lanes": app_lanes, "app_policy_sha256": canonical_app_policy_sha256(app_backends, app_lanes), "release": "V85"}
 
 
 def _mock_export(monkeypatch: pytest.MonkeyPatch, export: object, returncode: int = 0) -> None:
@@ -103,6 +113,12 @@ def test_automatic_excludes_paid_api_and_anthropic_even_without_export_opt_out()
     facts = sync_module.parse_routing_export(fixture_export())
     assert not facts.backends["claude"].automatic_enabled
     assert not facts.backends["or-best"].automatic_enabled
+
+
+def test_application_backends_in_new_harness_export_fields_are_ignored_by_complete_text_sync() -> None:
+    facts = sync_module.parse_routing_export(fixture_export())
+    assert "app-only" not in facts.backends
+    assert all("app-only" not in chain for chain in facts.http_chains.values())
 
 
 def test_openrouter_prefixed_or_free_model_is_rejected_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

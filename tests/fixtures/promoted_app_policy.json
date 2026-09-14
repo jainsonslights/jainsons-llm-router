@@ -1,0 +1,81 @@
+{
+  "app_backends": {
+    "deepseek-direct-flash": {
+      "kind": "app-metered",
+      "model": "deepseek-flash",
+      "price_card": {
+        "input_usd_per_million": 0.3,
+        "output_usd_per_million": 1.2,
+        "version": "deepseek-v4.1-flash-peak-2026-09"
+      },
+      "transport": {
+        "allowed_host": "api.deepseek.com",
+        "dialect": "openai-chat-completions",
+        "endpoint": "https://api.deepseek.com/chat/completions",
+        "key_env": "DEEPSEEK_API_KEY",
+        "payload_defaults": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
+    },
+    "glm-openrouter-flash": {
+      "kind": "app-metered",
+      "model": "z-ai/glm-5.3-flash",
+      "price_card": {
+        "input_usd_per_million": 0.075,
+        "output_usd_per_million": 0.25,
+        "version": "glm-5.3-flash-2026-09"
+      },
+      "transport": {
+        "allowed_host": "openrouter.ai",
+        "dialect": "openai-chat-completions",
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "key_env": "OPENROUTER_API_KEY",
+        "payload_defaults": {
+          "provider": {
+            "data_collection": "deny"
+          }
+        }
+      }
+    }
+  },
+  "app_lanes": {
+    "chat_fast": {
+      "approval": "owner 2026-09-14",
+      "backend_chain": [
+        "deepseek-direct-flash",
+        "glm-openrouter-flash"
+      ],
+      "budget_day_tz": "Asia/Kolkata",
+      "cap_alert_fractions": [0.8, 1.0],
+      "daily_cap_usd": 3.0,
+      "data_policy": "no openrouter :free; openrouter data_collection deny",
+      "max_deadline_seconds": 55,
+      "max_input_chars": 60000,
+      "max_output_tokens": 1300,
+      "primary_share": 0.6,
+      "purpose": "live customer text: website chat + phone voice",
+      "quality_gate": {
+        "gated_changes": ["backend_added", "model_changed", "transport_changed", "payload_defaults_changed", "dialect_changed"],
+        "immediate_changes": ["backend_removed", "cap_lowered", "limits_lowered"],
+        "judge": "harness_llm.ask_llm (free, no Claude)",
+        "judge_lane": "writing",
+        "judge_task_type": "text",
+        "max_latency_seconds": 15,
+        "min_samples": 10,
+        "pass_min_not_worse": 9,
+        "suite_id": "chat_fast_v1",
+        "swap_ab": true,
+        "ties_pass": true,
+        "version": 1,
+        "voice_max_latency_seconds": 6,
+        "weekly_recheck": "sun"
+      }
+    }
+  },
+  "app_policy_sha256": "2dc79b850e756ab6c30218578ac962b8ed25b4bfab8d82bb644b14e29412f035",
+  "release": "dev",
+  "schema": 1
+}

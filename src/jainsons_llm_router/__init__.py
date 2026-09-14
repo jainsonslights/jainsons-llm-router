@@ -12,9 +12,12 @@ from .adapters import (
     PriceCard,
     ProviderAdapter,
 )
+from .app_chat import ChatResult, acomplete_chat, app_policy_status, complete_chat
+from .app_alerts import set_alert_sink
 from .client import complete_text
 from .errors import (
     BudgetDenied,
+    BudgetExhausted,
     ConfigurationError,
     ExactModelUnavailable,
     InvalidRequest,
@@ -73,12 +76,14 @@ __all__ = [
     "BillingClass",
     "BudgetCap",
     "BudgetDenied",
+    "BudgetExhausted",
     "BudgetRemaining",
     "CallerContext",
     "Candidate",
     "CandidateHealth",
     "ChargeEstimate",
     "Clock",
+    "ChatResult",
     "ConfigurationError",
     "EventLogger",
     "ExactModel",
@@ -120,7 +125,11 @@ __all__ = [
     "UseRoute",
     "create_router",
     "complete_text",
+    "complete_chat",
+    "acomplete_chat",
+    "app_policy_status",
     "hash_private_identifier",
+    "set_alert_sink",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"
