@@ -1,47 +1,36 @@
-"""Generate the router's importable free-route order from ``harness.py``.
+"""Generate router routing policy from the harness's JSON export.
 
-This module deliberately parses the harness source with :mod:`ast`; it never
-imports or executes the live development harness.  The static-source contract
-is intentionally narrow and explicit so a harness refactor fails loudly:
-
-* ``BACKENDS = {...}`` contains ``name: (argv, edits_files, kind)`` entries.
-* Conditional backends use ``BACKENDS["name"] = (argv, edits_files, kind)``.
-* Claude-compatible conditional backends may pin their model through
-  ``BACKEND_ENV["name"]["ANTHROPIC_DEFAULT_SONNET_MODEL"]``.
-* ``API_BACKENDS``, ``LANE_TABLE``, ``DEFAULT_LANE``, and
-  ``AUTO_DISABLED_BACKENDS`` are statically assigned collections.
-* Model defaults may be literals or ``os.environ.get(NAME, DEFAULT)`` values,
-  such as ``CODEX_MODEL``, ``GLM_MODEL``, and ``KIMI_MODEL``.
-
-Worker health, authentication, admission, backoff, retry, and availability
-functions are outside this contract and are neither parsed nor generated.
+The harness is the routing-policy authority. This module deliberately runs
+``harness.py --routing-json`` rather than parsing its implementation.
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import difflib
 import hashlib
 import json
+import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .free_check import PORTED_FROM_HARNESS_SHA256
+
 DEFAULT_HARNESS_PATH = Path.home() / ".claude" / "skills" / "harness-offload" / "harness.py"
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parent / "policies" / "harness_derived.py"
+_EXPORT_SCHEMA = 1
 
 
 class HarnessSyncError(RuntimeError):
-    """The harness static-policy contract is missing, ambiguous, or unsafe."""
+    """The harness routing export is missing, malformed, or unsafe."""
 
 
 @dataclass(frozen=True)
 class BackendFact:
-    """One statically declared harness backend."""
-
     name: str
     kind: str
     funding: str
@@ -49,29 +38,31 @@ class BackendFact:
     model: str | None
     model_source: str
     automatic_enabled: bool
+    http_openrouter: bool
 
 
 @dataclass(frozen=True)
 class HarnessPolicyFacts:
-    """Policy-only facts extracted from harness source."""
-
     backends: Mapping[str, BackendFact]
     lane_table: Mapping[str, tuple[str, ...]]
+    escalation_chains: Mapping[str, tuple[str, ...]]
+    http_chains: Mapping[str, tuple[str, ...]]
+    openrouter_free_backends: tuple[str, ...]
+    free_check_sha256: str
     default_lane: str
-    auto_disabled_backends: frozenset[str]
+
+    @property
+    def auto_disabled_backends(self) -> frozenset[str]:
+        return frozenset(name for name, fact in self.backends.items() if not fact.automatic_enabled)
 
     @property
     def free_candidate_backends_by_lane(self) -> dict[str, tuple[str, ...]]:
         result: dict[str, tuple[str, ...]] = {}
-        for lane, order in self.lane_table.items():
+        for lane, order in self.escalation_chains.items():
             selected: list[str] = []
             for name in order:
-                backend = self.backends[name]
-                if (
-                    backend.billing_class == "free"
-                    and backend.automatic_enabled
-                    and name not in selected
-                ):
+                fact = self.backends[name]
+                if fact.kind == "or-free" and fact.automatic_enabled and name not in selected:
                     selected.append(name)
             result[lane] = tuple(selected)
         return result
@@ -79,647 +70,252 @@ class HarnessPolicyFacts:
     @property
     def policy_sha256(self) -> str:
         payload = {
-            "auto_disabled_backends": sorted(self.auto_disabled_backends),
-            "backends": {
-                name: {
-                    "automatic_enabled": fact.automatic_enabled,
-                    "billing_class": fact.billing_class,
-                    "funding": fact.funding,
-                    "kind": fact.kind,
-                    "model": fact.model,
-                    "model_source": fact.model_source,
-                }
-                for name, fact in sorted(self.backends.items())
-            },
+            "backends": {name: {
+                "automatic_enabled": fact.automatic_enabled,
+                "billing_class": fact.billing_class,
+                "funding": fact.funding,
+                "http_openrouter": fact.http_openrouter,
+                "kind": fact.kind,
+                "model": fact.model,
+            } for name, fact in sorted(self.backends.items())},
             "default_lane": self.default_lane,
-            "lane_table": {name: list(order) for name, order in sorted(self.lane_table.items())},
+            "escalation_chains": {lane: list(order) for lane, order in sorted(self.escalation_chains.items())},
+            "free_check_sha256": self.free_check_sha256,
+            "http_chains": {lane: list(order) for lane, order in sorted(self.http_chains.items())},
+            "lane_table": {lane: list(order) for lane, order in sorted(self.lane_table.items())},
+            "openrouter_free_backends": list(self.openrouter_free_backends),
         }
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-class _StaticEvaluator:
-    """Evaluate only the literal subset used by the harness policy symbols."""
-
-    _NO_STATIC_MATCH = object()
-
-    def __init__(self, assignments: Mapping[str, ast.expr]) -> None:
-        self.assignments = dict(assignments)
-        self._active: set[str] = set()
-
-    def value(self, node: ast.expr) -> Any:
-        if isinstance(node, ast.Constant):
-            return node.value
-        if isinstance(node, ast.List):
-            return self._expand_literal_elements(node.elts)
-        if isinstance(node, ast.Tuple):
-            return tuple(self._expand_literal_elements(node.elts))
-        if isinstance(node, ast.Set):
-            return set(self._expand_literal_elements(node.elts))
-        if isinstance(node, ast.Dict):
-            if any(key is None for key in node.keys):
-                raise HarnessSyncError("static policy dicts cannot use unpacking")
-            return {
-                self.value(key): self.value(value)
-                for key, value in zip(node.keys, node.values)
-                if key is not None  # narrowed after the explicit unpacking guard
-            }
-        if isinstance(node, ast.Name):
-            if node.id not in self.assignments:
-                raise HarnessSyncError(f"static symbol {node.id!r} is not assigned")
-            if node.id in self._active:
-                raise HarnessSyncError(f"cyclic static assignment involving {node.id!r}")
-            self._active.add(node.id)
-            try:
-                return self.value(self.assignments[node.id])
-            finally:
-                self._active.remove(node.id)
-        flattened = self._dict_values_flattening_call(node)
-        if flattened is not self._NO_STATIC_MATCH:
-            return flattened
-        if self._is_environ_get(node):
-            call = node
-            assert isinstance(call, ast.Call)
-            if len(call.args) < 2:
-                raise HarnessSyncError(
-                    "policy os.environ.get calls must provide a static default"
-                )
-            return self.value(call.args[1])
-        raise HarnessSyncError(
-            f"unsupported static policy expression: {ast.dump(node, include_attributes=False)}"
-        )
-
-    def _expand_literal_elements(self, elements: list[ast.expr]) -> list[Any]:
-        """Evaluate a static container literal, including explicit starred collections."""
-
-        result: list[Any] = []
-        for item in elements:
-            if isinstance(item, ast.Starred):
-                expanded = self.value(item.value)
-                if not isinstance(expanded, (list, tuple, set, frozenset)):
-                    raise HarnessSyncError(
-                        "static starred policy expression must resolve to a list, tuple, set, or frozenset"
-                    )
-                result.extend(expanded)
-            else:
-                result.append(self.value(item))
-        return result
-
-    def _dict_values_flattening_call(self, node: ast.expr) -> Any:
-        """Recognize the exact static dict-values flattening generator contract."""
-
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in {"frozenset", "set", "tuple", "list"}
-            and len(node.args) == 1
-            and not node.keywords
-            and isinstance(node.args[0], ast.GeneratorExp)
-        ):
-            return self._NO_STATIC_MATCH
-
-        generator = node.args[0]
-        if len(generator.generators) != 2:
-            return self._NO_STATIC_MATCH
-        outer, inner = generator.generators
-        if (
-            outer.is_async
-            or inner.is_async
-            or outer.ifs
-            or inner.ifs
-            or not isinstance(outer.target, ast.Name)
-            or not isinstance(inner.target, ast.Name)
-            or not isinstance(generator.elt, ast.Name)
-            or generator.elt.id != inner.target.id
-            or not isinstance(inner.iter, ast.Name)
-            or inner.iter.id != outer.target.id
-            or not isinstance(outer.iter, ast.Call)
-            or outer.iter.args
-            or outer.iter.keywords
-            or not isinstance(outer.iter.func, ast.Attribute)
-            or outer.iter.func.attr != "values"
-        ):
-            return self._NO_STATIC_MATCH
-
-        mapping = self.value(outer.iter.func.value)
-        if not isinstance(mapping, dict):
-            raise HarnessSyncError(
-                "static dict-values generator source must resolve to a dict"
-            )
-
-        flattened: list[Any] = []
-        for key, value in mapping.items():
-            if not isinstance(value, (list, tuple, set, frozenset)):
-                raise HarnessSyncError(
-                    "static dict-values generator value for "
-                    f"key {key!r} must resolve to a list, tuple, set, or frozenset; got {value!r}"
-                )
-            flattened.extend(value)
-        return {"frozenset": frozenset, "set": set, "tuple": tuple, "list": list}[node.func.id](
-            flattened
-        )
-
-    @staticmethod
-    def _is_environ_get(node: ast.expr) -> bool:
-        return (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
-            and isinstance(node.func.value, ast.Attribute)
-            and node.func.value.attr == "environ"
-            and isinstance(node.func.value.value, ast.Name)
-            and node.func.value.value.id == "os"
-        )
-
-
-def _simple_assignments(tree: ast.Module) -> dict[str, ast.expr]:
-    assignments: dict[str, ast.expr] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    assignments[target.id] = node.value
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.value is not None
-        ):
-            assignments[node.target.id] = node.value
-    return assignments
-
-
-def _required_expr(assignments: Mapping[str, ast.expr], name: str) -> ast.expr:
+def _required(mapping: Mapping[str, Any], key: str, context: str) -> Any:
     try:
-        return assignments[name]
+        return mapping[key]
     except KeyError as exc:
-        raise HarnessSyncError(
-            f"required harness.py symbol {name!r} is missing; the sync parser contract must be updated"
-        ) from exc
+        raise HarnessSyncError(f"routing export missing required {context}.{key}") from exc
 
 
-def _subscript_key(target: ast.expr, collection: str) -> str | None:
-    if not isinstance(target, ast.Subscript):
-        return None
-    if not isinstance(target.value, ast.Name) or target.value.id != collection:
-        return None
-    key = target.slice
-    if isinstance(key, ast.Constant) and isinstance(key.value, str):
-        return key.value
-    return None
+def _string(value: Any, context: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise HarnessSyncError(f"routing export {context} must be a non-empty string")
+    return value
 
 
-def _all_assignments(tree: ast.Module) -> list[ast.Assign | ast.AnnAssign]:
-    nodes = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))]
-    return sorted(nodes, key=lambda node: (node.lineno, node.col_offset))
+def _string_list(value: Any, context: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise HarnessSyncError(f"routing export {context} must be a list of non-empty strings")
+    return tuple(value)
 
 
-def _assignment_targets(node: ast.Assign | ast.AnnAssign) -> Iterable[ast.expr]:
-    if isinstance(node, ast.Assign):
-        return node.targets
-    return (node.target,)
-
-
-def _assignment_value(node: ast.Assign | ast.AnnAssign) -> ast.expr | None:
-    return node.value
-
-
-def _dict_items(node: ast.expr, symbol: str) -> list[tuple[str, ast.expr]]:
-    if not isinstance(node, ast.Dict):
-        raise HarnessSyncError(f"{symbol} must remain a static dict literal")
-    result: list[tuple[str, ast.expr]] = []
-    for key_node, value_node in zip(node.keys, node.values):
-        if key_node is None:
-            raise HarnessSyncError(f"{symbol} cannot use dict unpacking")
-        if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
-            raise HarnessSyncError(f"{symbol} keys must remain string literals")
-        result.append((key_node.value, value_node))
-    return result
-
-
-def _backend_value_parts(node: ast.expr, name: str) -> tuple[ast.expr, str]:
-    if not isinstance(node, (ast.Tuple, ast.List)) or len(node.elts) != 3:
-        raise HarnessSyncError(
-            f"BACKENDS[{name!r}] must remain an (argv, edits_files, kind) tuple"
-        )
-    argv, edits_files, kind = node.elts
-    if not isinstance(argv, (ast.List, ast.Tuple)):
-        raise HarnessSyncError(f"BACKENDS[{name!r}] argv must remain a static list/tuple")
-    if not isinstance(edits_files, ast.Constant) or not isinstance(edits_files.value, bool):
-        raise HarnessSyncError(f"BACKENDS[{name!r}] edits_files must remain a boolean literal")
-    if not isinstance(kind, ast.Constant) or not isinstance(kind.value, str):
-        raise HarnessSyncError(f"BACKENDS[{name!r}] kind must remain a string literal")
-    return argv, kind.value
-
-
-def _model_from_argv(
-    argv: ast.expr,
-    *,
-    evaluator: _StaticEvaluator,
-) -> tuple[str | None, str]:
-    assert isinstance(argv, (ast.List, ast.Tuple))
-    items = argv.elts
-    for index, item in enumerate(items[:-1]):
-        if isinstance(item, ast.Constant) and item.value in {"-m", "--model"}:
-            model_node = items[index + 1]
-            source = ast.unparse(model_node)
-            try:
-                value = evaluator.value(model_node)
-            except HarnessSyncError:
-                # For example CATALOG["or-free-name"]["id"] is a static
-                # external catalog reference, but harness.py itself does not
-                # contain the concrete model ID. Preserve the expression and
-                # do not import that catalog or execute the harness.
-                if _expression_root_name(model_node) == "CATALOG":
-                    return None, source
-                raise
-            if value in {None, ""}:
-                return None, source
-            if not isinstance(value, str):
-                raise HarnessSyncError(f"backend model {source!r} did not resolve to a string")
-            return value, source
-    return None, "provider-default"
-
-
-def _expression_root_name(node: ast.expr) -> str | None:
-    current = node
-    while isinstance(current, (ast.Subscript, ast.Attribute)):
-        current = current.value
-    return current.id if isinstance(current, ast.Name) else None
-
-
-def _backend_env_models(
-    tree: ast.Module,
-    evaluator: _StaticEvaluator,
-) -> dict[str, tuple[str, str]]:
-    result: dict[str, tuple[str, str]] = {}
-    for node in _all_assignments(tree):
-        value = _assignment_value(node)
-        if value is None:
-            continue
-        for target in _assignment_targets(node):
-            backend = _subscript_key(target, "BACKEND_ENV")
-            if backend is None:
-                continue
-            if not isinstance(value, ast.Dict):
-                raise HarnessSyncError(f"BACKEND_ENV[{backend!r}] must remain a static dict literal")
-            for key_node, value_node in zip(value.keys, value.values):
-                if (
-                    isinstance(key_node, ast.Constant)
-                    and key_node.value == "ANTHROPIC_DEFAULT_SONNET_MODEL"
-                ):
-                    source = ast.unparse(value_node)
-                    model = evaluator.value(value_node)
-                    if not isinstance(model, str) or not model:
-                        raise HarnessSyncError(
-                            f"BACKEND_ENV[{backend!r}] Sonnet model must resolve to a non-empty string"
-                        )
-                    result[backend] = (model, source)
-    return result
-
-
-def _backend_nodes(tree: ast.Module, assignments: Mapping[str, ast.expr]) -> dict[str, ast.expr]:
-    result = dict(_dict_items(_required_expr(assignments, "BACKENDS"), "BACKENDS"))
-    for node in _all_assignments(tree):
-        value = _assignment_value(node)
-        if value is None:
-            continue
-        for target in _assignment_targets(node):
-            backend = _subscript_key(target, "BACKENDS")
-            if backend is None:
-                continue
-            if backend in result:
-                raise HarnessSyncError(
-                    f"BACKENDS[{backend!r}] is assigned more than once; refusing ambiguous policy"
-                )
-            result[backend] = value
-    if not result:
-        raise HarnessSyncError("BACKENDS is empty")
-    return result
-
-
-def _string_set(evaluator: _StaticEvaluator, node: ast.expr, symbol: str) -> frozenset[str]:
-    value = evaluator.value(node)
-    if not isinstance(value, (set, frozenset, tuple, list)) or not all(
-        isinstance(item, str) for item in value
-    ):
-        raise HarnessSyncError(f"{symbol} must resolve to a collection of backend names")
-    return frozenset(value)
-
-
-def _classify_kind(name: str, kind: str, api_backends: frozenset[str]) -> tuple[str, str]:
-    if name in api_backends:
-        if kind != "API$$":
-            raise HarnessSyncError(
-                f"paid backend {name!r} has unexpected kind {kind!r}; update the sync classifier"
-            )
+def _classify_kind(kind: str) -> tuple[str, str]:
+    if kind == "API$$":
         return "paid_api", "paid"
     if kind in {"sub", "sub-free", "sub-anthropic", "sub-glm", "sub-kimi"}:
         return "subscription", "free"
-    if kind in {"or-free", "omni-free"}:
+    if kind in {"or-free", "omni-free", "media"}:
         return "free_service", "free"
-    if kind == "media":
-        return "free_service", "free"  # local capability service (e.g. OCR via harness_media.py)
-    raise HarnessSyncError(
-        f"backend {name!r} has unknown kind {kind!r}; update the sync classifier explicitly"
-    )
+    raise HarnessSyncError(f"routing export backend has unknown kind {kind!r}")
 
 
-def parse_harness_source(source: str, *, filename: str = "harness.py") -> HarnessPolicyFacts:
-    """Extract the static policy contract without importing ``harness.py``."""
+def parse_routing_export(export: Any) -> HarnessPolicyFacts:
+    """Validate and normalize one schema-1 harness routing export."""
+    if not isinstance(export, dict):
+        raise HarnessSyncError("routing export must be a JSON object")
+    if export.get("schema") != _EXPORT_SCHEMA:
+        raise HarnessSyncError(f"routing export schema mismatch: expected {_EXPORT_SCHEMA}, got {export.get('schema')!r}")
 
-    try:
-        tree = ast.parse(source, filename=filename)
-    except SyntaxError as exc:
-        raise HarnessSyncError(f"cannot parse {filename}: {exc}") from exc
-    assignments = _simple_assignments(tree)
-    evaluator = _StaticEvaluator(assignments)
-
-    api_backends = _string_set(
-        evaluator, _required_expr(assignments, "API_BACKENDS"), "API_BACKENDS"
-    )
-    auto_disabled = _string_set(
-        evaluator,
-        _required_expr(assignments, "AUTO_DISABLED_BACKENDS"),
-        "AUTO_DISABLED_BACKENDS",
-    )
-    env_models = _backend_env_models(tree, evaluator)
-    backend_nodes = _backend_nodes(tree, assignments)
-
-    unknown_paid = api_backends.difference(backend_nodes)
-    if unknown_paid:
-        raise HarnessSyncError(f"API_BACKENDS references unknown backends: {sorted(unknown_paid)}")
-    unknown_disabled = auto_disabled.difference(backend_nodes)
-    if unknown_disabled:
-        raise HarnessSyncError(
-            f"AUTO_DISABLED_BACKENDS references unknown backends: {sorted(unknown_disabled)}"
-        )
-
+    default_lane = _string(_required(export, "default_lane", "root"), "default_lane")
+    raw_backends = _required(export, "backends", "root")
+    if not isinstance(raw_backends, dict) or not raw_backends:
+        raise HarnessSyncError("routing export backends must be a non-empty object")
     backends: dict[str, BackendFact] = {}
-    for name, node in sorted(backend_nodes.items()):
-        argv, kind = _backend_value_parts(node, name)
-        model, model_source = _model_from_argv(argv, evaluator=evaluator)
-        if model is None and model_source == "provider-default" and name in env_models:
-            model, env_source = env_models[name]
-            model_source = f"BACKEND_ENV[{name!r}].ANTHROPIC_DEFAULT_SONNET_MODEL ({env_source})"
-        funding, billing_class = _classify_kind(name, kind, api_backends)
-        backends[name] = BackendFact(
-            name=name,
-            kind=kind,
-            funding=funding,
-            billing_class=billing_class,
-            model=model,
-            model_source=model_source,
-            automatic_enabled=name not in auto_disabled and name not in api_backends,
-        )
-
-    # The existing router structurally rejects GLM from automatic routes.  If
-    # harness.py ever enables or removes it, regeneration must stop for a human
-    # compatibility decision rather than claiming the two policies are synced.
-    if "glm" not in backends:
-        raise HarnessSyncError(
-            "harness.py no longer declares the expected GLM backend; review the router GLM invariant"
-        )
-    if "glm" not in auto_disabled:
-        raise HarnessSyncError(
-            "harness.py enables GLM for automatic routing, but RoutePolicy forbids it; human review required"
-        )
-
-    lane_value = evaluator.value(_required_expr(assignments, "LANE_TABLE"))
-    if not isinstance(lane_value, dict) or not lane_value:
-        raise HarnessSyncError("LANE_TABLE must resolve to a non-empty dict")
-    lane_table: dict[str, tuple[str, ...]] = {}
-    for lane, order in lane_value.items():
-        if not isinstance(lane, str) or not isinstance(order, (tuple, list)) or not order:
-            raise HarnessSyncError("LANE_TABLE entries must map lane strings to backend sequences")
-        if not all(isinstance(item, str) for item in order):
-            raise HarnessSyncError(f"LANE_TABLE[{lane!r}] contains a non-string backend")
-        unknown = set(order).difference(backends)
-        if unknown:
+    for name, raw in raw_backends.items():
+        if not isinstance(name, str) or not name or not isinstance(raw, dict):
+            raise HarnessSyncError("routing export backends must map backend names to objects")
+        kind = _string(_required(raw, "kind", f"backends[{name!r}]"), f"backends[{name!r}].kind")
+        model = _required(raw, "model", f"backends[{name!r}]")
+        if model == "":
+            model = None  # harness V82 exports unset models (e.g. or-best without HARNESS_BEST_MODEL) as ""
+        if model is not None and (not isinstance(model, str) or not model):
+            raise HarnessSyncError(f"routing export backends[{name!r}].model must be a string or null")
+        auto_disabled = _required(raw, "auto_disabled", f"backends[{name!r}]")
+        http_openrouter = _required(raw, "http_openrouter", f"backends[{name!r}]")
+        if not isinstance(auto_disabled, bool) or not isinstance(http_openrouter, bool):
+            raise HarnessSyncError(f"routing export backends[{name!r}] boolean fields are invalid")
+        if http_openrouter != (kind == "or-free"):
+            raise HarnessSyncError(f"routing export backends[{name!r}].http_openrouter must be true only for kind 'or-free'")
+        if kind == "or-free" and model is None:
+            raise HarnessSyncError(f"routing export or-free backend {name!r} has null model")
+        if kind == "or-free" and model.startswith("openrouter/"):
             raise HarnessSyncError(
-                f"LANE_TABLE[{lane!r}] references unknown backends: {sorted(unknown)}"
+                f"routing export or-free backend {name!r} has forbidden openrouter/ model prefix"
             )
-        lane_table[lane] = tuple(order)
+        funding, billing_class = _classify_kind(kind)
+        # The harness excludes capped Anthropic subscriptions and paid API
+        # routes from automatic dispatch, in addition to export opt-outs.
+        automatic = (not auto_disabled) and kind != "sub-anthropic" and funding != "paid_api"
+        backends[name] = BackendFact(name, kind, funding, billing_class, model, "harness routing export", automatic, http_openrouter)
 
-    default_lane = evaluator.value(_required_expr(assignments, "DEFAULT_LANE"))
-    if not isinstance(default_lane, str) or default_lane not in lane_table:
-        raise HarnessSyncError("DEFAULT_LANE must name a lane present in LANE_TABLE")
+    openrouter_free_backends = _string_list(_required(export, "openrouter_free_backends", "root"), "openrouter_free_backends")
+    if len(set(openrouter_free_backends)) != len(openrouter_free_backends):
+        raise HarnessSyncError("routing export openrouter_free_backends contains duplicates")
+    for name in openrouter_free_backends:
+        fact = backends.get(name)
+        if fact is None or fact.kind != "or-free" or fact.model is None:
+            raise HarnessSyncError(f"routing export openrouter_free_backends has invalid backend {name!r}")
 
-    return HarnessPolicyFacts(
-        backends=backends,
-        lane_table=lane_table,
-        default_lane=default_lane,
-        auto_disabled_backends=auto_disabled,
-    )
+    raw_check = _required(export, "free_check", "root")
+    if not isinstance(raw_check, dict):
+        raise HarnessSyncError("routing export free_check must be an object")
+    _string(_required(raw_check, "function", "free_check"), "free_check.function")
+    free_check_sha256 = _string(_required(raw_check, "source_sha256", "free_check"), "free_check.source_sha256")
+
+    raw_lanes = _required(export, "lanes", "root")
+    if not isinstance(raw_lanes, dict) or not raw_lanes:
+        raise HarnessSyncError("routing export lanes must be a non-empty object")
+    lane_table: dict[str, tuple[str, ...]] = {}
+    escalation_chains: dict[str, tuple[str, ...]] = {}
+    http_chains: dict[str, tuple[str, ...]] = {}
+    for lane, raw in raw_lanes.items():
+        if not isinstance(lane, str) or not lane or not isinstance(raw, dict):
+            raise HarnessSyncError("routing export lanes must map lane names to objects")
+        primary = _string(_required(raw, "primary", f"lanes[{lane!r}]"), f"lanes[{lane!r}].primary")
+        fallback = _string(_required(raw, "fallback", f"lanes[{lane!r}]"), f"lanes[{lane!r}].fallback")
+        if primary not in backends or fallback not in backends:
+            raise HarnessSyncError(f"routing export lanes[{lane!r}] references an unknown primary or fallback")
+        escalation = _string_list(_required(raw, "escalation_chain", f"lanes[{lane!r}]"), f"lanes[{lane!r}].escalation_chain")
+        http = _string_list(_required(raw, "http_chain", f"lanes[{lane!r}]"), f"lanes[{lane!r}].http_chain")
+        for chain_name in (*escalation, *http):
+            fact = backends.get(chain_name)
+            if fact is None:
+                raise HarnessSyncError(f"routing export lane {lane!r} references unknown backend {chain_name!r}")
+            if chain_name.startswith("claude") or fact.billing_class == "paid":
+                raise HarnessSyncError(f"routing export lane {lane!r} includes forbidden Claude/paid backend {chain_name!r}")
+        for chain_name in http:
+            if not backends[chain_name].http_openrouter:
+                raise HarnessSyncError(f"routing export lane {lane!r} http_chain includes non-OpenRouter backend {chain_name!r}")
+        lane_table[lane] = (primary, fallback)
+        escalation_chains[lane] = escalation
+        http_chains[lane] = http
+    if default_lane not in lane_table:
+        raise HarnessSyncError("routing export default_lane must name an exported lane")
+    glm = backends.get("glm")
+    if glm is not None and glm.automatic_enabled:
+        raise HarnessSyncError("routing export enables GLM for automatic routing; human review required")
+    return HarnessPolicyFacts(backends, lane_table, escalation_chains, http_chains, openrouter_free_backends, free_check_sha256, default_lane)
 
 
 def read_harness_policy(path: str | Path) -> HarnessPolicyFacts:
-    source_path = Path(path).expanduser()
+    """Run the harness export in an empty temporary working directory."""
     try:
-        source = source_path.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as cwd:
+            completed = subprocess.run(
+                [sys.executable, str(Path(path).expanduser()), "--routing-json"],
+                cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=90, check=False,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise HarnessSyncError("harness routing export timed out after 90 seconds") from exc
     except OSError as exc:
-        raise HarnessSyncError(f"cannot read harness source {source_path}: {exc}") from exc
-    return parse_harness_source(source, filename=str(source_path))
+        raise HarnessSyncError(f"cannot run harness routing export: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip()
+        raise HarnessSyncError(f"harness routing export exited {completed.returncode}{(': ' + detail) if detail else ''}")
+    try:
+        return parse_routing_export(json.loads(completed.stdout))
+    except json.JSONDecodeError as exc:
+        raise HarnessSyncError("harness routing export returned invalid JSON") from exc
 
 
 def _quoted_tuple(values: Iterable[str]) -> str:
     items = tuple(values)
     if not items:
         return "()"
-    if len(items) == 1:
-        return f"({items[0]!r},)"
-    return "(" + ", ".join(repr(item) for item in items) + ")"
+    return f"({items[0]!r},)" if len(items) == 1 else "(" + ", ".join(repr(item) for item in items) + ")"
 
 
 def render_policy_module(facts: HarnessPolicyFacts) -> str:
-    """Render deterministic, importable policy data from extracted facts."""
-
+    """Render deterministic, importable policy data from an export."""
     lines = [
-        '"""Generated from harness.py static routing policy. DO NOT EDIT BY HAND.\n',
-        "\n",
+        '"""Generated from harness.py routing export. DO NOT EDIT BY HAND.\n', "\n",
         "Regenerate with ``python -m jainsons_llm_router.sync_from_harness``.\n",
-        "The digest covers extracted policy facts only, not harness runtime logic.\n",
-        '"""\n',
-        "\n",
-        "from __future__ import annotations\n",
-        "\n",
-        "from collections.abc import Iterable, Mapping\n",
-        "from dataclasses import dataclass\n",
-        "from types import MappingProxyType\n",
-        "\n",
-        "from ..errors import ConfigurationError\n",
-        "from ..models import BillingClass, Candidate\n",
-        "\n",
-        "\n",
-        "@dataclass(frozen=True)\n",
-        "class HarnessBackendPolicy:\n",
-        "    name: str\n",
-        "    kind: str\n",
-        "    funding: str\n",
-        "    billing_class: BillingClass\n",
-        "    model: str | None\n",
-        "    model_source: str\n",
-        "    automatic_enabled: bool\n",
-        "\n",
-        "\n",
+        "The digest covers models, HTTP chains, and the harness free-check hash.\n", '\"\"\"\n\n',
+        "from __future__ import annotations\n\nfrom collections.abc import Iterable, Mapping\n",
+        "from dataclasses import dataclass\nfrom types import MappingProxyType\n\n",
+        "from .. import free_check\nfrom ..errors import ConfigurationError\nfrom ..models import BillingClass, Candidate\n\n\n",
+        "@dataclass(frozen=True)\nclass HarnessBackendPolicy:\n",
+        "    name: str\n    kind: str\n    funding: str\n    billing_class: BillingClass\n",
+        "    model: str | None\n    model_source: str\n    automatic_enabled: bool\n\n\n",
         f"HARNESS_POLICY_SHA256 = {facts.policy_sha256!r}\n",
+        f"HARNESS_FREE_CHECK_SHA256 = {facts.free_check_sha256!r}\n",
         f"DEFAULT_LANE = {facts.default_lane!r}\n",
         f"AUTO_DISABLED_BACKENDS = frozenset({_quoted_tuple(sorted(facts.auto_disabled_backends))})\n",
-        "GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS\n",
-        "\n",
-        "BACKENDS = MappingProxyType({\n",
+        "GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS\n\nBACKENDS = MappingProxyType({\n",
     ]
     for name, fact in sorted(facts.backends.items()):
         billing = "BillingClass.FREE" if fact.billing_class == "free" else "BillingClass.PAID"
-        lines.extend(
-            [
-                f"    {name!r}: HarnessBackendPolicy(\n",
-                f"        name={name!r}, kind={fact.kind!r}, funding={fact.funding!r},\n",
-                f"        billing_class={billing}, model={fact.model!r},\n",
-                f"        model_source={fact.model_source!r}, automatic_enabled={fact.automatic_enabled!r},\n",
-                "    ),\n",
-            ]
-        )
-    lines.extend(["})\n", "\n", "LANE_BACKEND_ORDER = MappingProxyType({\n"])
-    for lane, order in sorted(facts.lane_table.items()):
-        lines.append(f"    {lane!r}: {_quoted_tuple(order)},\n")
-    lines.extend(["})\n", "\n", "FREE_CANDIDATE_BACKENDS_BY_LANE = MappingProxyType({\n"])
-    for lane, order in sorted(facts.free_candidate_backends_by_lane.items()):
-        lines.append(f"    {lane!r}: {_quoted_tuple(order)},\n")
-    lines.extend(
-        [
-            "})\n",
-            "\n",
-            "\n",
-            "def free_candidate_backend_order(lane: str) -> tuple[str, ...]:\n",
-            "    try:\n",
-            "        return FREE_CANDIDATE_BACKENDS_BY_LANE[lane]\n",
-            "    except KeyError as exc:\n",
-            "        raise ConfigurationError(f'unknown harness lane: {lane}') from exc\n",
-            "\n",
-            "\n",
-            "def order_free_candidates(\n",
-            "    lane: str,\n",
-            "    candidates_by_backend: Mapping[str, Candidate],\n",
-            "    *,\n",
-            "    allow_missing: Iterable[str] = (),\n",
-            ") -> tuple[Candidate, ...]:\n",
-            "    \"\"\"Apply harness order to deployment-owned free Candidate objects.\n",
-            "\n",
-            "    Missing harness backends fail unless explicitly acknowledged in\n",
-            "    ``allow_missing``. Paid candidates, caps, approvals, adapter/account\n",
-            "    wiring, and exact-model pins remain local to the consuming route.\n",
-            "    \"\"\"\n",
-            "\n",
-            "    order = free_candidate_backend_order(lane)\n",
-            "    allowed = frozenset(allow_missing)\n",
-            "    unknown_allowed = allowed.difference(order)\n",
-            "    if unknown_allowed:\n",
-            "        raise ConfigurationError(\n",
-            "            f'allow_missing contains backends outside lane {lane}: {sorted(unknown_allowed)}'\n",
-            "        )\n",
-            "    missing = [name for name in order if name not in candidates_by_backend and name not in allowed]\n",
-            "    if missing:\n",
-            "        raise ConfigurationError(\n",
-            "            f'missing harness-derived free candidates for lane {lane}: {missing}'\n",
-            "        )\n",
-            "    selected: list[Candidate] = []\n",
-            "    for name in order:\n",
-            "        candidate = candidates_by_backend.get(name)\n",
-            "        if candidate is None:\n",
-            "            continue\n",
-            "        if candidate.billing_class is not BillingClass.FREE:\n",
-            "            raise ConfigurationError(f'harness backend {name} must map to a free Candidate')\n",
-            "        if not candidate.zero_marginal_cost:\n",
-            "            raise ConfigurationError(\n",
-            "                f'harness backend {name} must prove zero marginal cost'\n",
-            "            )\n",
-            "        selected.append(candidate)\n",
-            "    return tuple(selected)\n",
-            "\n",
-        ]
-    )
+        lines.extend([f"    {name!r}: HarnessBackendPolicy(\n", f"        name={name!r}, kind={fact.kind!r}, funding={fact.funding!r},\n", f"        billing_class={billing}, model={fact.model!r},\n", f"        model_source={fact.model_source!r}, automatic_enabled={fact.automatic_enabled!r},\n", "    ),\n"])
+    lines.extend(["})\n\nLANE_BACKEND_ORDER = MappingProxyType({\n"])
+    for lane, order in sorted(facts.lane_table.items()): lines.append(f"    {lane!r}: {_quoted_tuple(order)},\n")
+    lines.extend(["})\n\nFREE_CANDIDATE_BACKENDS_BY_LANE = MappingProxyType({\n"])
+    for lane, order in sorted(facts.free_candidate_backends_by_lane.items()): lines.append(f"    {lane!r}: {_quoted_tuple(order)},\n")
+    lines.extend(["})\n\nHTTP_CHAIN_BY_LANE = MappingProxyType({\n"])
+    for lane, order in sorted(facts.http_chains.items()): lines.append(f"    {lane!r}: {_quoted_tuple(order)},\n")
+    lines.extend(["})\n\n", f"OPENROUTER_FREE_BACKENDS = {_quoted_tuple(facts.openrouter_free_backends)}\n\n",
+        "def free_candidate_backend_order(lane: str) -> tuple[str, ...]:\n    try:\n        configured = FREE_CANDIDATE_BACKENDS_BY_LANE[lane]\n    except KeyError as exc:\n        raise ConfigurationError(f'unknown harness lane: {lane}') from exc\n    return tuple(\n        name for name in configured\n        if (policy := BACKENDS.get(name)) is not None\n        and policy.kind == 'or-free'\n        and policy.model is not None\n        and free_check.model_is_free(policy.model)\n    )\n\n\n",
+        "def order_free_candidates(lane: str, candidates_by_backend: Mapping[str, Candidate], *, allow_missing: Iterable[str] = ()) -> tuple[Candidate, ...]:\n",
+        "    order = free_candidate_backend_order(lane)\n    allowed = frozenset(allow_missing)\n    unknown_allowed = allowed.difference(order)\n",
+        "    if unknown_allowed:\n        raise ConfigurationError(f'allow_missing contains backends outside lane {lane}: {sorted(unknown_allowed)}')\n",
+        "    missing = [name for name in order if name not in candidates_by_backend and name not in allowed]\n    if missing:\n        raise ConfigurationError(f'missing harness-derived free candidates for lane {lane}: {missing}')\n",
+        "    selected: list[Candidate] = []\n    for name in order:\n        policy = BACKENDS[name]\n        candidate = candidates_by_backend.get(name)\n        if candidate is None:\n            continue\n        if candidate.billing_class is not BillingClass.FREE or not candidate.zero_marginal_cost:\n            raise ConfigurationError(f'harness backend {name} must map to a zero-cost free Candidate')\n        if candidate.model != policy.model or not free_check.model_is_free(policy.model):\n            continue\n        selected.append(candidate)\n    return tuple(selected)\n",
+    ])
     return "".join(lines)
 
 
 def _drift_diff(current: str, expected: str, output_path: Path) -> str:
-    diff = difflib.unified_diff(
-        current.splitlines(),
-        expected.splitlines(),
-        fromfile=str(output_path),
-        tofile=f"{output_path} (regenerated)",
-        lineterm="",
-    )
-    return "\n".join(list(diff)[:80])
+    return "\n".join(list(difflib.unified_diff(current.splitlines(), expected.splitlines(), fromfile=str(output_path), tofile=f"{output_path} (regenerated)", lineterm=""))[:80])
 
 
-def sync(
-    *,
-    harness_path: str | Path = DEFAULT_HARNESS_PATH,
-    output_path: str | Path = DEFAULT_OUTPUT_PATH,
-    check: bool = False,
-) -> int:
+def sync(*, harness_path: str | Path = DEFAULT_HARNESS_PATH, output_path: str | Path = DEFAULT_OUTPUT_PATH, check: bool = False, accept_free_check_hash: bool = False) -> int:
     facts = read_harness_policy(harness_path)
+    if accept_free_check_hash:
+        print(facts.free_check_sha256)
+        return 0
+    if facts.free_check_sha256 != PORTED_FROM_HARNESS_SHA256:
+        raise HarnessSyncError("harness free-check changed; re-port router free_check.py")
     rendered = render_policy_module(facts)
     output = Path(output_path).expanduser()
     if check:
-        try:
-            current = output.read_text(encoding="utf-8")
+        try: current = output.read_text(encoding="utf-8")
         except FileNotFoundError:
-            print(f"harness-sync: drift: generated policy is missing: {output}", file=sys.stderr)
-            return 1
-        except OSError as exc:
-            raise HarnessSyncError(f"cannot read generated policy {output}: {exc}") from exc
+            print(f"harness-sync: drift: generated policy is missing: {output}", file=sys.stderr); return 1
+        except OSError as exc: raise HarnessSyncError(f"cannot read generated policy {output}: {exc}") from exc
         if current != rendered:
-            print(
-                "harness-sync: drift detected; run "
-                "`python -m jainsons_llm_router.sync_from_harness`",
-                file=sys.stderr,
-            )
-            print(_drift_diff(current, rendered, output), file=sys.stderr)
-            return 1
-        print(f"harness-sync: current ({output})")
-        return 0
-
+            print("harness-sync: drift detected; run `python -m jainsons_llm_router.sync_from_harness`", file=sys.stderr)
+            print(_drift_diff(current, rendered, output), file=sys.stderr); return 1
+        print(f"harness-sync: current ({output})"); return 0
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     try:
-        temporary.write_text(rendered, encoding="utf-8")
-        temporary.replace(output)
-    except OSError as exc:
-        raise HarnessSyncError(f"cannot write generated policy {output}: {exc}") from exc
-    print(f"harness-sync: wrote {output}")
-    return 0
+        temporary.write_text(rendered, encoding="utf-8"); temporary.replace(output)
+    except OSError as exc: raise HarnessSyncError(f"cannot write generated policy {output}: {exc}") from exc
+    print(f"harness-sync: wrote {output}"); return 0
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--harness",
-        type=Path,
-        default=DEFAULT_HARNESS_PATH,
-        help=f"harness.py source path (default: {DEFAULT_HARNESS_PATH})",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=DEFAULT_OUTPUT_PATH,
-        help=f"generated policy path (default: {DEFAULT_OUTPUT_PATH})",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="do not write; exit 1 when the committed generated policy is stale",
-    )
+    parser.add_argument("--harness", type=Path, default=DEFAULT_HARNESS_PATH)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--accept-free-check-hash", action="store_true", help="print a changed free-check hash without writing")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    try:
-        return sync(harness_path=args.harness, output_path=args.output, check=args.check)
+    try: return sync(harness_path=args.harness, output_path=args.output, check=args.check, accept_free_check_hash=args.accept_free_check_hash)
     except HarnessSyncError as exc:
-        print(f"harness-sync: error: {exc}", file=sys.stderr)
-        return 2
+        print(f"harness-sync: error: {exc}", file=sys.stderr); return 2
 
 
 if __name__ == "__main__":

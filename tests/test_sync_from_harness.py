@@ -1,184 +1,131 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from jainsons_llm_router import BillingClass, Candidate, ConfigurationError
-from jainsons_llm_router.policies.harness_derived import (
-    BACKENDS,
-    FREE_CANDIDATE_BACKENDS_BY_LANE,
-    GLM_AUTOMATIC_DISABLED,
-    order_free_candidates,
-)
-from jainsons_llm_router.sync_from_harness import (
-    HarnessSyncError,
-    main,
-    parse_harness_source,
-    render_policy_module,
-)
-
-FIXTURE = Path(__file__).parent / "fixtures" / "harness_policy_snapshot.py"
+from jainsons_llm_router import BillingClass, Candidate
+from jainsons_llm_router import sync_from_harness as sync_module
+from jainsons_llm_router.policies import harness_derived
 
 
-def _free_candidate(backend: str) -> Candidate:
-    return Candidate(
-        provider=backend,
-        model=f"local-{backend}-pin",
-        adapter=backend,
-        billing_class=BillingClass.FREE,
-        provider_account_alias=f"{backend}-account",
-        zero_marginal_cost=True,
-    )
-
-
-def test_fixture_generates_expected_static_policy() -> None:
-    facts = parse_harness_source(FIXTURE.read_text(encoding="utf-8"), filename=str(FIXTURE))
-
-    assert facts.default_lane == "research"
-    assert facts.auto_disabled_backends == frozenset({"glm", "kimi"})
-    assert facts.backends["codex"].model == "gpt-fixture-main"
-    assert facts.backends["codex-sol"].model == "gpt-fixture-hard"
-    assert facts.backends["glm"].model == "glm-fixture"
-    assert facts.backends["glm"].automatic_enabled is False
-    assert facts.backends["or-best"].billing_class == "paid"
-    assert facts.backends["or-free-fixture"].model is None
-    assert facts.backends["or-free-fixture"].model_source == (
-        "CATALOG['or-free-fixture']['id']"
-    )
-    assert facts.free_candidate_backends_by_lane == {
-        "research": ("agy", "codex"),
-        "code": ("codex", "agy"),
-        "image_gen": ("agy",),
-        "planning": ("claude", "codex"),
+def fixture_export() -> dict[str, object]:
+    free = {
+        "or-free-ling": "qwen/qwen3-coder:free",
+        "or-free-alpha": "meta/alpha:free",
+        "or-free-beta": "google/beta:free",
     }
-
-    rendered = render_policy_module(facts)
-    assert "HARNESS_POLICY_SHA256" in rendered
-    assert "model='gpt-fixture-main'" in rendered
-    assert "'glm': HarnessBackendPolicy(" in rendered
-    assert rendered == render_policy_module(facts)
-
-
-def test_runtime_only_harness_changes_do_not_change_generated_policy() -> None:
-    source = FIXTURE.read_text(encoding="utf-8")
-    facts = parse_harness_source(source, filename=str(FIXTURE))
-    with_runtime_change = source + "\ndef worker_health_retry_backoff():\n    return 'changed'\n"
-    changed = parse_harness_source(with_runtime_change, filename=str(FIXTURE))
-
-    assert render_policy_module(changed) == render_policy_module(facts)
-
-
-def test_generated_helper_applies_order_and_requires_explicit_missing_acknowledgement() -> None:
-    codex = _free_candidate("codex")
-    kimi = _free_candidate("kimi")
-    assert order_free_candidates("code", {"codex": codex, "kimi": kimi}) == (codex, kimi)
-
-    with pytest.raises(ConfigurationError, match="missing harness-derived"):
-        order_free_candidates("code", {"codex": codex})
-    assert order_free_candidates("code", {"codex": codex}, allow_missing={"kimi"}) == (codex,)
+    backends: dict[str, dict[str, object]] = {
+        name: {"kind": "or-free", "model": model, "auto_disabled": False, "http_openrouter": True}
+        for name, model in free.items()
+    }
+    backends.update({
+        "codex": {"kind": "sub", "model": "gpt-5.6-terra", "auto_disabled": False, "http_openrouter": False},
+        "agy": {"kind": "sub-free", "model": None, "auto_disabled": False, "http_openrouter": False},
+        "claude": {"kind": "sub-anthropic", "model": None, "auto_disabled": False, "http_openrouter": False},
+        "glm": {"kind": "sub-glm", "model": "glm-5.2", "auto_disabled": True, "http_openrouter": False},
+        "omni-fast": {"kind": "omni-free", "model": "omni-free", "auto_disabled": False, "http_openrouter": False},
+        "or-best": {"kind": "API$$", "model": "paid/model", "auto_disabled": False, "http_openrouter": False},
+    })
+    lanes: dict[str, dict[str, object]] = {}
+    for lane in ("research", "writing"):
+        lanes[lane] = {"primary": "codex", "fallback": "agy", "escalation_chain": ["codex", "agy", *free], "http_chain": list(free)}
+    for lane in ("code", "ui"):
+        lanes[lane] = {"primary": "codex", "fallback": "agy", "escalation_chain": ["codex", "or-free-ling"], "http_chain": ["or-free-ling"]}
+    for lane in ("planning", "domain_ops", "legal_finance"):
+        lanes[lane] = {"primary": "codex", "fallback": "agy", "escalation_chain": ["codex", "agy"], "http_chain": []}
+    return {"schema": 1, "default_lane": "research", "openrouter_free_backends": list(free), "free_check": {"function": "openrouter_free_catalog._openrouter_model_is_free", "source_sha256": "fixture-free-check-hash"}, "backends": backends, "lanes": lanes}
 
 
-def test_generated_live_snapshot_preserves_glm_off_and_lane_order() -> None:
-    assert GLM_AUTOMATIC_DISABLED
-    assert BACKENDS["glm"].automatic_enabled is False
-    assert FREE_CANDIDATE_BACKENDS_BY_LANE["code"] == ("codex", "kimi")
+def _mock_export(monkeypatch: pytest.MonkeyPatch, export: object, returncode: int = 0) -> None:
+    monkeypatch.setattr(sync_module.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], returncode, json.dumps(export), "failed export"))
 
 
-def test_check_mode_detects_drift_without_real_harness(tmp_path: Path, capsys) -> None:
+def test_sync_renders_exported_models_http_chains_and_hash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_export(monkeypatch, fixture_export())
+    monkeypatch.setattr(sync_module, "PORTED_FROM_HARNESS_SHA256", "fixture-free-check-hash")
     output = tmp_path / "harness_derived.py"
-    common = ["--harness", str(FIXTURE), "--output", str(output)]
-
-    assert main(common) == 0
-    assert main([*common, "--check"]) == 0
-    output.write_text(output.read_text(encoding="utf-8") + "# stale\n", encoding="utf-8")
-    assert main([*common, "--check"]) == 1
-    assert "drift detected" in capsys.readouterr().err
-
-
-def test_missing_required_symbol_fails_loudly() -> None:
-    source = FIXTURE.read_text(encoding="utf-8").replace(
-        'AUTO_DISABLED_BACKENDS = {"glm", "kimi"}',
-        'RENAMED_DISABLED_BACKENDS = {"glm", "kimi"}',
-    )
-    with pytest.raises(HarnessSyncError, match="AUTO_DISABLED_BACKENDS.*missing"):
-        parse_harness_source(source, filename="refactored_harness.py")
+    assert sync_module.main(["--harness", "fake-harness.py", "--output", str(output)]) == 0
+    rendered = output.read_text(encoding="utf-8")
+    assert "HARNESS_FREE_CHECK_SHA256 = 'fixture-free-check-hash'" in rendered
+    assert "OPENROUTER_FREE_BACKENDS = ('or-free-ling', 'or-free-alpha', 'or-free-beta')" in rendered
+    assert "'research': ('or-free-ling', 'or-free-alpha', 'or-free-beta')" in rendered
+    assert "model='gpt-5.6-terra'" in rendered
+    assert "HTTP_CHAIN_BY_LANE" in rendered
+    assert "from .. import free_check" in rendered
+    assert sync_module.main(["--harness", "fake-harness.py", "--output", str(output), "--check"]) == 0
 
 
-def test_missing_referenced_model_symbol_fails_loudly() -> None:
-    source = FIXTURE.read_text(encoding="utf-8").replace(
-        'CODEX_MODEL = os.environ.get("HARNESS_CODEX_MODEL", "gpt-fixture-main")',
-        'RENAMED_CODEX_MODEL = os.environ.get("HARNESS_CODEX_MODEL", "gpt-fixture-main")',
-    )
-    with pytest.raises(HarnessSyncError, match="CODEX_MODEL.*not assigned"):
-        parse_harness_source(source, filename="missing_model_symbol_harness.py")
+@pytest.mark.parametrize("export", ["not-json", {"schema": 2}, {**fixture_export(), "backends": {"or-free-ling": {"kind": "or-free", "model": None, "auto_disabled": False, "http_openrouter": True}}}])
+def test_bad_export_exits_two_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, export: object) -> None:
+    output = tmp_path / "harness_derived.py"
+    if export == "not-json":
+        monkeypatch.setattr(sync_module.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "{bad", ""))
+    else:
+        _mock_export(monkeypatch, export)
+    assert sync_module.main(["--harness", "fake-harness.py", "--output", str(output)]) == 2
+    assert not output.exists()
 
 
-def test_starred_static_set_expands_a_resolved_frozenset() -> None:
-    source = FIXTURE.read_text(encoding="utf-8").replace(
-        'AUTO_DISABLED_BACKENDS = {"glm", "kimi"}',
-        '\n'.join(
-            (
-                'STATIC_FALLBACK_TIERS = {"only": ("kimi",)}',
-                'STATIC_FALLBACK_BACKENDS = frozenset(',
-                '    backend for tier in STATIC_FALLBACK_TIERS.values() for backend in tier',
-                ')',
-                'AUTO_DISABLED_BACKENDS = {"glm", *STATIC_FALLBACK_BACKENDS}',
-            )
-        ),
-    )
-
-    facts = parse_harness_source(source, filename="starred_set_harness.py")
-
-    assert facts.auto_disabled_backends == frozenset({"glm", "kimi"})
+def test_failed_export_and_hash_mismatch_write_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    output = tmp_path / "harness_derived.py"
+    _mock_export(monkeypatch, fixture_export(), returncode=1)
+    assert sync_module.main(["--harness", "fake", "--output", str(output)]) == 2
+    assert not output.exists()
+    _mock_export(monkeypatch, fixture_export())
+    assert sync_module.main(["--harness", "fake", "--output", str(output)]) == 2
+    assert "harness free-check changed; re-port router free_check.py" in capsys.readouterr().err
+    assert not output.exists()
 
 
-def test_dict_values_flattening_generator_resolves_manual_fallbacks() -> None:
-    source = FIXTURE.read_text(encoding="utf-8").replace(
-        'AUTO_DISABLED_BACKENDS = {"glm", "kimi"}',
-        '\n'.join(
-            (
-                'CLAUDE_CODE_FALLBACK_TIERS = {"first": ("kimi",), "second": ("codex",)}',
-                'MANUAL_FALLBACK_BACKENDS = frozenset(',
-                '    backend for tier in CLAUDE_CODE_FALLBACK_TIERS.values() for backend in tier',
-                ')',
-                'AUTO_DISABLED_BACKENDS = {"glm", *MANUAL_FALLBACK_BACKENDS}',
-            )
-        ),
-    )
-
-    facts = parse_harness_source(source, filename="flattening_generator_harness.py")
-
-    assert facts.auto_disabled_backends == frozenset({"glm", "kimi", "codex"})
+def test_accept_changed_hash_prints_only_and_does_not_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    _mock_export(monkeypatch, fixture_export())
+    output = tmp_path / "harness_derived.py"
+    assert sync_module.main(["--harness", "fake", "--output", str(output), "--accept-free-check-hash"]) == 0
+    assert capsys.readouterr().out.strip() == "fixture-free-check-hash"
+    assert not output.exists()
 
 
-@pytest.mark.parametrize(
-    "generator",
-    (
-        'backend for tier in CLAUDE_CODE_FALLBACK_TIERS.values() if tier for backend in tier',
-        'backend for groups in CLAUDE_CODE_FALLBACK_TIERS.values() for tier in groups for backend in tier',
-    ),
-)
-def test_nonmatching_dict_values_generators_fail_loudly(generator: str) -> None:
-    source = FIXTURE.read_text(encoding="utf-8").replace(
-        'AUTO_DISABLED_BACKENDS = {"glm", "kimi"}',
-        '\n'.join(
-            (
-                'CLAUDE_CODE_FALLBACK_TIERS = {"first": (("kimi",),)}',
-                f'MANUAL_FALLBACK_BACKENDS = frozenset({generator})',
-                'AUTO_DISABLED_BACKENDS = {"glm", *MANUAL_FALLBACK_BACKENDS}',
-            )
-        ),
-    )
-
-    with pytest.raises(HarnessSyncError, match="unsupported static policy expression"):
-        parse_harness_source(source, filename="nonmatching_generator_harness.py")
+def test_forbidden_paid_or_claude_chain_is_rejected() -> None:
+    export = fixture_export()
+    lanes = export["lanes"]
+    assert isinstance(lanes, dict)
+    lane = lanes["research"]
+    assert isinstance(lane, dict)
+    lane["escalation_chain"] = ["claude"]
+    with pytest.raises(sync_module.HarnessSyncError, match="forbidden Claude/paid"):
+        sync_module.parse_routing_export(export)
 
 
-def test_enabling_glm_requires_human_router_review() -> None:
-    source = FIXTURE.read_text(encoding="utf-8").replace(
-        'AUTO_DISABLED_BACKENDS = {"glm", "kimi"}',
-        'AUTO_DISABLED_BACKENDS = {"kimi"}',
-    )
-    with pytest.raises(HarnessSyncError, match="enables GLM"):
-        parse_harness_source(source, filename="glm_enabled_harness.py")
+def test_automatic_excludes_paid_api_and_anthropic_even_without_export_opt_out() -> None:
+    facts = sync_module.parse_routing_export(fixture_export())
+    assert not facts.backends["claude"].automatic_enabled
+    assert not facts.backends["or-best"].automatic_enabled
+
+
+def test_openrouter_prefixed_or_free_model_is_rejected_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    export = fixture_export()
+    backends = export["backends"]
+    assert isinstance(backends, dict)
+    backends["or-free-ling"]["model"] = "openrouter/qwen/qwen3-coder:free"
+    _mock_export(monkeypatch, export)
+    monkeypatch.setattr(sync_module, "PORTED_FROM_HARNESS_SHA256", "fixture-free-check-hash")
+    output = tmp_path / "harness_derived.py"
+    output.write_text("unchanged", encoding="utf-8")
+    assert sync_module.main(["--harness", "fake-harness.py", "--output", str(output)]) == 2
+    assert output.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_generated_free_order_excludes_cli_and_non_free_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = harness_derived.BACKENDS["or-free-ling"].model
+    assert model is not None
+    monkeypatch.setattr(harness_derived.free_check, "model_is_free", lambda value: value == model)
+    order = harness_derived.free_candidate_backend_order("research")
+    assert order == ("or-free-ling",)
+    candidates = {
+        "codex": Candidate("codex", "gpt-5.6-terra", "test", BillingClass.FREE, "codex", zero_marginal_cost=True),
+        "or-free-ling": Candidate("or-free-ling", model, "test", BillingClass.FREE, "or-free-ling", zero_marginal_cost=True),
+    }
+    assert harness_derived.order_free_candidates("research", candidates) == (candidates["or-free-ling"],)

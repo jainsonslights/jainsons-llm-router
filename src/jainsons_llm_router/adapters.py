@@ -111,6 +111,7 @@ class GenericHTTPAdapter:
         extra_headers: Mapping[str, str] | None = None,
         idempotency_header: str | None = "Idempotency-Key",
         opener: Callable[..., Any] | None = None,
+        live_free_check: Callable[[str], bool] | None = None,
     ) -> None:
         if not endpoint.startswith(("https://", "http://")):
             raise ValueError("HTTP adapter endpoint must be http(s)")
@@ -125,6 +126,7 @@ class GenericHTTPAdapter:
         self.extra_headers = dict(extra_headers or {})
         self.idempotency_header = idempotency_header
         self._opener = opener or urllib.request.urlopen
+        self._live_free_check = live_free_check
 
     @staticmethod
     def _estimated_input_tokens(request: LLMRequest) -> int:
@@ -155,7 +157,9 @@ class GenericHTTPAdapter:
     def is_non_billable(self, *, model: str, price_card_version: str | None) -> bool:
         if price_card_version is None:
             return False
-        return model in self.verified_free_models.get(price_card_version, ())
+        if model not in self.verified_free_models.get(price_card_version, ()):
+            return False
+        return self._live_free_check is None or self._live_free_check(model)
 
     def health(self) -> tuple[bool, str | None]:
         if not os.environ.get(self.api_key_env):
@@ -203,6 +207,10 @@ class GenericHTTPAdapter:
             raise AdapterFailure("invalid_provider_response", phase=FailurePhase.UNKNOWN) from exc
 
     def complete(self, request: AdapterRequest) -> AdapterResult:
+        # Re-check at the HTTP dispatch boundary. is_non_billable() makes the
+        # router skip stale candidates; this also closes the check/request gap.
+        if self._live_free_check is not None and not self._live_free_check(request.model):
+            raise AdapterFailure("model_not_currently_free", phase=FailurePhase.PRE_DISPATCH)
         secret = os.environ.get(self.api_key_env)
         if not secret:
             raise AdapterFailure("credential_unavailable", phase=FailurePhase.PRE_DISPATCH)

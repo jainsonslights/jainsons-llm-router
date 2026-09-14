@@ -32,13 +32,8 @@ from .models import (
     RouterConfig,
     UseRoute,
 )
-from .policies.harness_derived import (
-    BACKENDS,
-    FREE_CANDIDATE_BACKENDS_BY_LANE,
-    HARNESS_POLICY_SHA256,
-    free_candidate_backend_order,
-    order_free_candidates,
-)
+from . import free_check
+from .policies import harness_derived
 from .router import Router, create_router
 
 DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
@@ -103,7 +98,7 @@ def lane_primary_backend(lane: str) -> str:
     Lets callers resolve a capability's model from the harness-mirrored registry
     instead of a per-repo env var. Falls back to None when unknown.
     """
-    order = free_candidate_backend_order(lane)
+    order = harness_derived.free_candidate_backend_order(lane)
     return order[0] if order else None
 
 
@@ -112,31 +107,33 @@ def _lane_candidates(lane: str) -> tuple[Candidate, ...]:
 
     # This call is intentionally first: it supplies the canonical unknown-lane
     # error from the generated policy instead of maintaining a second lane list.
-    backend_order = free_candidate_backend_order(lane)
+    harness_derived.free_candidate_backend_order(lane)
     if lane in _SPECIAL_CAPABILITY_LANES:
         raise ConfigurationError(
             f"harness lane {lane!r} requires an explicitly configured "
             "capability adapter; complete_text will not make that call"
         )
 
-    by_backend: dict[str, Candidate] = {}
-    unavailable: set[str] = set()
+    # The checked-in pre-V82 derived module deliberately has no HTTP chain.
+    # Until V82 is exported and synced this remains empty (fail closed).
+    backend_order = getattr(harness_derived, "HTTP_CHAIN_BY_LANE", {}).get(lane, ())
+    candidates: list[Candidate] = []
     for backend_name in backend_order:
-        policy = BACKENDS.get(backend_name)
+        policy = harness_derived.BACKENDS.get(backend_name)
         if policy is None:
             raise ConfigurationError(
                 f"harness lane {lane!r} references unknown backend {backend_name!r}; "
                 "regenerate harness_derived.py"
             )
-        if policy.billing_class is BillingClass.PAID or policy.funding == "paid_api":
-            raise ConfigurationError(
-                f"harness lane {lane!r} includes paid-capable backend {backend_name!r}; "
-                "explicit paid configuration and a durable ledger are required"
-            )
-        if not policy.automatic_enabled or not policy.model:
-            unavailable.add(backend_name)
+        if (
+            policy.kind != "or-free"
+            or not policy.automatic_enabled
+            or policy.billing_class is not BillingClass.FREE
+            or not policy.model
+            or not policy.model.endswith(":free")
+        ):
             continue
-        by_backend[backend_name] = Candidate(
+        candidates.append(Candidate(
             provider=backend_name,
             model=policy.model,
             adapter=_ADAPTER_NAME,
@@ -144,24 +141,21 @@ def _lane_candidates(lane: str) -> tuple[Candidate, ...]:
             provider_account_alias=f"{backend_name}-free",
             price_card_version=_FREE_PRICE_CARD_VERSION,
             zero_marginal_cost=True,
-            timeout_seconds=3_600.0,
-        )
-
-    candidates = order_free_candidates(lane, by_backend, allow_missing=unavailable)
+            timeout_seconds=120.0,
+        ))
     if not candidates:
         missing = ", ".join(backend_order) or "none"
         raise RouteUnavailable(
-            f"harness lane {lane!r} has no configured free HTTP model "
-            f"(checked backends: {missing}); sync the harness policy or configure "
-            "the capability's explicit adapter"
+            f"harness lane {lane} has no currently-free HTTP model under harness rules "
+            f"(checked: {missing})"
         )
-    return candidates
+    return tuple(candidates)
 
 
 def _build_router(endpoint: str, api_key_env: str) -> Router:
     routes: dict[str, RoutePolicy] = {}
     models: set[str] = set()
-    for lane in FREE_CANDIDATE_BACKENDS_BY_LANE:
+    for lane in harness_derived.FREE_CANDIDATE_BACKENDS_BY_LANE:
         if lane in _SPECIAL_CAPABILITY_LANES:
             continue
         try:
@@ -195,9 +189,10 @@ def _build_router(endpoint: str, api_key_env: str) -> Router:
         supported_models=models,
         supported_modalities={"text"},
         verified_free_models={_FREE_PRICE_CARD_VERSION: models},
+        live_free_check=free_check.model_is_free,
     )
     config = RouterConfig(
-        policy_version=f"harness-{HARNESS_POLICY_SHA256[:16]}",
+        policy_version=f"harness-{harness_derived.HARNESS_POLICY_SHA256[:16]}",
         routes=routes,
     )
     return create_router(config, adapters={_ADAPTER_NAME: adapter}, ledger=_FreeOnlyLedger())
