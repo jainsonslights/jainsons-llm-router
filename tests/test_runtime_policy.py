@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from jainsons_llm_router import RouteUnavailable, app_policy_status, set_alert_sink
-from jainsons_llm_router.runtime_policy import RuntimePolicy, canonical_app_policy_sha256
+from jainsons_llm_router import RouteUnavailable, app_policy_status, complete_chat, set_alert_sink
+from jainsons_llm_router import runtime_policy
+from jainsons_llm_router.runtime_policy import RuntimePolicy, canonical_app_policy_sha256, validate_app_policy
 
 
 def test_real_harness_export_fixture_has_the_canonical_app_policy_hash() -> None:
@@ -84,6 +85,51 @@ def write_policy(path: Path, policy: dict[str, object]) -> None:
     path.write_text(json.dumps(policy), encoding="utf-8")
 
 
+@pytest.mark.parametrize("entry", [[], {}, ["deepseek-direct-flash"], 1, True, None])
+def test_invalid_backend_chain_entry_skips_only_its_lane(tmp_path, entry):
+    policy = promoted_policy()
+    policy["app_lanes"]["invalid"] = {"backend_chain": ["deepseek-direct-flash", entry]}
+    policy["app_policy_sha256"] = canonical_app_policy_sha256(policy["app_backends"], policy["app_lanes"])
+    path = tmp_path / "policy.json"
+    write_policy(path, policy)
+
+    loaded = validate_app_policy(policy, path)
+    assert set(loaded.app_lanes) == {"chat_fast"}
+    assert loaded.lane_statuses["invalid"] == {"valid": False, "reason": "invalid_lane"}
+
+
+@pytest.mark.parametrize("scenario", ["disabled", "missing_parent", "not_writable", "script", "other_json", "valid"])
+def test_skipped_alerts_only_write_beside_actual_writable_policy(tmp_path, monkeypatch, scenario):
+    policy = promoted_policy()
+    policy["app_lanes"]["invalid"] = {"backend_chain": []}
+    policy["app_policy_sha256"] = canonical_app_policy_sha256(policy["app_backends"], policy["app_lanes"])
+    policy_dir = tmp_path / "policy"
+    policy_dir.mkdir()
+    path = policy_dir / "custom-export.json"
+    write_policy(path, policy)
+    file_stat = path.stat()
+    if scenario == "missing_parent":
+        path = tmp_path / "missing" / "policy.json"
+    elif scenario == "not_writable":
+        monkeypatch.setattr(runtime_policy.os, "access", lambda *_args: False)
+    elif scenario in {"script", "other_json"}:
+        path = tmp_path / ("script.py" if scenario == "script" else "other.json")
+        path.write_text("print('script')" if scenario == "script" else "{}", encoding="utf-8")
+
+    loaded = validate_app_policy(policy, path, file_stat=file_stat, emit_skipped_alerts=scenario != "disabled")
+    assert loaded.lane_statuses["invalid"]["reason"] == "invalid_lane"
+    assert not (tmp_path / "ledger").exists()
+    assert not (tmp_path / "alerts.jsonl").exists()
+    assert not (tmp_path / "missing").exists()
+    if scenario == "valid":
+        assert (policy_dir / "ledger").is_dir()
+        events = [json.loads(line) for line in (policy_dir / "alerts.jsonl").read_text().splitlines()]
+        assert [event["type"] for event in events] == ["policy_lane_skipped"]
+    else:
+        assert not (policy_dir / "ledger").exists()
+        assert not (policy_dir / "alerts.jsonl").exists()
+
+
 def test_loads_harness_shaped_promoted_policy_and_reports_redacted_status(tmp_path, monkeypatch):
     path = tmp_path / "policy.json"
     write_policy(path, promoted_policy())
@@ -94,7 +140,7 @@ def test_loads_harness_shaped_promoted_policy_and_reports_redacted_status(tmp_pa
     assert policy.release == "V85"
     assert tuple(policy.app_lanes["chat_fast"]["backend_chain"]) == ("deepseek-direct-flash", "glm-openrouter-flash")
     status = app_policy_status(policy_path=path)
-    assert status["package_version"] == "0.5.0"
+    assert status["package_version"] == "0.6.0"
     assert status["backends"] == [
         {"name": "deepseek-direct-flash", "key_present": True},
         {"name": "glm-openrouter-flash", "key_present": False},
@@ -268,3 +314,65 @@ def test_lane_settings_are_strictly_bounded(tmp_path, field, value):
     write_policy(path, policy)
     with pytest.raises(RouteUnavailable):
         RuntimePolicy(path).load()
+
+
+def test_unknown_lane_is_skipped_without_blocking_valid_chat_and_alert_is_deduped(tmp_path):
+    policy = promoted_policy()
+    policy["app_backends"]["future-backend"] = {"transport": {"dialect": "future-v9"}}
+    policy["app_lanes"]["future_lane"] = {
+        "lane_kind": "future_kind",
+        "backend_chain": ["future-backend"],
+    }
+    policy["app_policy_sha256"] = canonical_app_policy_sha256(policy["app_backends"], policy["app_lanes"])
+    path = tmp_path / "policy.json"
+    write_policy(path, policy)
+    seen = []
+    set_alert_sink(seen.append)
+    try:
+        loaded = RuntimePolicy(path, reload_interval=0).load()
+        RuntimePolicy(path, reload_interval=0).load()
+    finally:
+        set_alert_sink(None)
+    assert set(loaded.app_lanes) == {"chat_fast"}
+    assert "future-backend" not in loaded.app_backends
+    assert loaded.lane_statuses["future_lane"]["reason"] == "unknown_lane_kind"
+    assert [event["type"] for event in seen] == ["policy_lane_skipped"]
+    status = app_policy_status(type="future_lane", policy_path=path)
+    assert status["valid"] is False
+    assert status["lane_status"] == {"valid": False, "reason": "unknown_lane_kind"}
+    with pytest.raises(RouteUnavailable):
+        complete_chat([{"role": "user", "content": "hello"}], type="future_lane", policy_path=path)
+
+
+def test_unknown_backend_dialect_skips_only_its_referencing_lane(tmp_path):
+    policy = promoted_policy()
+    policy["app_backends"]["future-backend"] = {
+        "kind": "app-metered",
+        "model": "future/model",
+        "transport": {
+            "endpoint": "https://openrouter.ai/api/v1/future",
+            "allowed_host": "openrouter.ai",
+            "key_env": "OPENROUTER_API_KEY",
+            "dialect": "future-v9",
+            "payload_defaults": {},
+        },
+        "price_card": {"version": "future", "input": 0.1, "output": 0},
+    }
+    policy["app_lanes"]["future_lane"] = {
+        "backend_chain": ["future-backend"],
+        "max_output_tokens": 10,
+        "max_input_chars": 10,
+        "max_deadline_seconds": 1,
+        "primary_share": 1,
+        "daily_cap_usd": 1,
+        "cap_alert_fractions": [1],
+        "budget_day_tz": "Asia/Kolkata",
+    }
+    policy["app_policy_sha256"] = canonical_app_policy_sha256(policy["app_backends"], policy["app_lanes"])
+    path = tmp_path / "policy.json"
+    write_policy(path, policy)
+
+    loaded = RuntimePolicy(path).load()
+    assert set(loaded.app_lanes) == {"chat_fast"}
+    assert loaded.lane_statuses["future_lane"] == {"valid": False, "reason": "unknown_dialect"}
+    assert "future-backend" not in loaded.app_backends

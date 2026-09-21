@@ -13,6 +13,7 @@ from .adapters import (
     ProviderAdapter,
 )
 from .app_chat import ChatResult, acomplete_chat, app_policy_status, complete_chat
+from .app_decide import DecisionResult, adecide, decide, decide_or
 from .app_alerts import set_alert_sink
 from .client import complete_text
 from .errors import (
@@ -84,6 +85,7 @@ __all__ = [
     "ChargeEstimate",
     "Clock",
     "ChatResult",
+    "DecisionResult",
     "ConfigurationError",
     "EventLogger",
     "ExactModel",
@@ -127,9 +129,12 @@ __all__ = [
     "complete_text",
     "complete_chat",
     "acomplete_chat",
+    "decide",
+    "adecide",
+    "decide_or",
     "app_policy_status",
     "hash_private_identifier",
     "set_alert_sink",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

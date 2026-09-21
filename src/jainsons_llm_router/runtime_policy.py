@@ -59,6 +59,7 @@ class AppPolicy:
     loaded_at: str
     mtime_ns: int
     file_size: int
+    lane_statuses: Mapping[str, Mapping[str, Any]]
 
     def lane(self, name: str) -> Mapping[str, Any]:
         try:
@@ -95,11 +96,17 @@ def _require_string(value: Any, field: str) -> str:
     return value
 
 
-_PAYLOAD_KEYS_BY_HOST = {
-    "api.deepseek.com": frozenset({"thinking"}),
-    "openrouter.ai": frozenset({"provider"}),
+_PAYLOAD_KEYS_BY_DIALECT = {
+    "openai-chat-completions": {
+        "api.deepseek.com": frozenset({"thinking"}),
+        "openrouter.ai": frozenset({"provider"}),
+    },
+    "typesafe-systemone": {
+        "openrouter.ai": frozenset({"provider"}),
+    },
 }
 _PROVIDER_KEYS = frozenset({"data_collection", "order", "allow_fallbacks", "only", "ignore", "sort"})
+_SYSTEMONE_PROVIDER_KEYS = _PROVIDER_KEYS | {"zdr"}
 
 
 def _validate_scalar_or_string_list(value: Any, path: str) -> None:
@@ -114,25 +121,35 @@ def _validate_scalar_or_string_list(value: Any, path: str) -> None:
     _validate_payload_defaults(value, path)
 
 
-def _validate_payload_defaults(value: Any, path: str = "payload_defaults", *, host: str | None = None) -> None:
+def _validate_payload_defaults(
+    value: Any,
+    path: str = "payload_defaults",
+    *,
+    host: str | None = None,
+    dialect: str | None = None,
+) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
             if not isinstance(key, str):
                 raise ConfigurationError(f"app policy {path} keys must be strings")
             if key in _FORBIDDEN_PAYLOAD_KEYS:
                 raise ConfigurationError(f"app policy {path} contains protected request key")
-            if path == "payload_defaults" and host is not None and key not in _PAYLOAD_KEYS_BY_HOST[host]:
+            allowed_top_level = _PAYLOAD_KEYS_BY_DIALECT.get(dialect or "", {}).get(host or "", frozenset())
+            if path == "payload_defaults" and host is not None and key not in allowed_top_level:
                 raise ConfigurationError(f"app policy {path} contains an unapproved key for its host")
             if path == "payload_defaults" and host == "api.deepseek.com" and key == "thinking" and not isinstance(child, dict):
                 raise ConfigurationError("app policy deepseek thinking defaults must be an object")
             if path == "payload_defaults" and host == "openrouter.ai" and key == "provider" and not isinstance(child, dict):
                 raise ConfigurationError("app policy openrouter provider defaults must be an object")
             if path == "payload_defaults.provider":
-                if key not in _PROVIDER_KEYS:
+                provider_keys = _SYSTEMONE_PROVIDER_KEYS if dialect == "typesafe-systemone" else _PROVIDER_KEYS
+                if key not in provider_keys:
                     raise ConfigurationError(f"app policy {path} contains an unapproved provider key")
+                if key == "zdr" and not isinstance(child, bool):
+                    raise ConfigurationError("app policy payload_defaults.provider.zdr must be a boolean")
                 _validate_scalar_or_string_list(child, f"{path}.{key}")
             else:
-                _validate_payload_defaults(child, f"{path}.{key}")
+                _validate_payload_defaults(child, f"{path}.{key}", dialect=dialect)
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _validate_payload_defaults(child, f"{path}[{index}]")
@@ -152,7 +169,8 @@ def _validate_backend(name: str, raw: Any) -> None:
     if model.endswith(":free"):
         raise ConfigurationError("app policy may not route an OpenRouter free model")
     transport = _require_mapping(backend.get("transport"), f"app_backends[{name!r}].transport")
-    if transport.get("dialect") != "openai-chat-completions":
+    dialect = transport.get("dialect")
+    if dialect not in _PAYLOAD_KEYS_BY_DIALECT:
         raise ConfigurationError("app policy transport dialect is not approved")
     endpoint = _require_string(transport.get("endpoint"), f"app_backends[{name!r}].transport.endpoint")
     allowed_host = _require_string(transport.get("allowed_host"), f"app_backends[{name!r}].transport.allowed_host")
@@ -172,8 +190,12 @@ def _validate_backend(name: str, raw: Any) -> None:
     expected_key_env = HOST_KEY_ENVS.get(allowed_host)
     if expected_key_env is None or transport.get("key_env") != expected_key_env:
         raise ConfigurationError("app policy host/key environment binding is not approved")
+    if dialect == "typesafe-systemone" and (
+        allowed_host != "openrouter.ai" or endpoint != "https://openrouter.ai/api/v1/systemone"
+    ):
+        raise ConfigurationError("app policy typesafe-systemone endpoint binding is not approved")
     defaults = _require_mapping(transport.get("payload_defaults", {}), f"app_backends[{name!r}].payload_defaults")
-    _validate_payload_defaults(defaults, host=allowed_host)
+    _validate_payload_defaults(defaults, host=allowed_host, dialect=str(dialect))
     card = _require_mapping(backend.get("price_card"), f"app_backends[{name!r}].price_card")
     _require_string(card.get("version"), f"app_backends[{name!r}].price_card.version")
     for field, alternate in (
@@ -192,11 +214,17 @@ def _validate_backend(name: str, raw: Any) -> None:
 
 def _validate_lane(name: str, raw: Any, backends: Mapping[str, Any]) -> None:
     lane = _require_mapping(raw, f"app_lanes[{name!r}]")
+    lane_kind = lane.get("lane_kind", "chat")
+    if lane_kind not in {"chat", "decision"}:
+        raise ConfigurationError("app policy lane kind is not supported")
     chain = lane.get("backend_chain")
     if not isinstance(chain, list) or not chain or not all(isinstance(item, str) and item for item in chain):
         raise ConfigurationError("app policy backend_chain must be a non-empty string list")
     if any(item not in backends for item in chain):
         raise ConfigurationError("app policy lane references an undeclared backend")
+    expected_dialect = "openai-chat-completions" if lane_kind == "chat" else "typesafe-systemone"
+    if any(backends[item]["transport"].get("dialect") != expected_dialect for item in chain):
+        raise ConfigurationError("app policy lane/backend dialect is incompatible")
 
     def bounded_number(field: str, low: float, high: float, *, strict_low: bool = False) -> None:
         value = lane.get(field)
@@ -210,11 +238,34 @@ def _validate_lane(name: str, raw: Any, backends: Mapping[str, Any]) -> None:
             raise ConfigurationError(f"app policy app_lanes[{name!r}].{field} is invalid")
 
     bounded_number("daily_cap_usd", 0, 50, strict_low=True)
-    for field, high in (("max_output_tokens", 8000), ("max_input_chars", 500000), ("max_deadline_seconds", 120)):
+    integer_bounds = [("max_input_chars", 500000)]
+    if lane_kind == "chat":
+        integer_bounds.extend((("max_output_tokens", 8000), ("max_deadline_seconds", 120)))
+    else:
+        integer_bounds.extend((("max_questions", 50), ("max_deadline_seconds", 30)))
+    for field, high in integer_bounds:
         value = lane.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > high:
             raise ConfigurationError(f"app policy app_lanes[{name!r}].{field} is invalid")
-    bounded_number("primary_share", 0, 1, strict_low=True)
+    if lane_kind == "chat":
+        bounded_number("primary_share", 0, 1, strict_low=True)
+    else:
+        profiles = lane.get("min_confidence_profiles")
+        if not isinstance(profiles, dict) or "default" not in profiles or not profiles:
+            raise ConfigurationError(f"app policy app_lanes[{name!r}].min_confidence_profiles is invalid")
+        for profile_name, threshold in profiles.items():
+            if (
+                not isinstance(profile_name, str)
+                or not re.fullmatch(r"[a-z0-9_]{1,40}", profile_name)
+                or not isinstance(threshold, (int, float))
+                or isinstance(threshold, bool)
+                or not math.isfinite(threshold)
+                or not 0 <= threshold <= 1
+            ):
+                raise ConfigurationError(f"app policy app_lanes[{name!r}].min_confidence_profiles is invalid")
+        quality_gate = lane.get("quality_gate")
+        if not isinstance(quality_gate, dict) or not quality_gate:
+            raise ConfigurationError(f"app policy app_lanes[{name!r}].quality_gate is invalid")
     fractions = lane.get("cap_alert_fractions")
     if (
         not isinstance(fractions, list)
@@ -238,13 +289,36 @@ def _validate_lane(name: str, raw: Any, backends: Mapping[str, Any]) -> None:
         raise ConfigurationError(f"app policy app_lanes[{name!r}].budget_day_tz is invalid") from None
 
 
+def _skipped_alert_directory(path: str | os.PathLike[str], raw: Any) -> Path | None:
+    """Use only an existing writable directory containing this policy export."""
+
+    try:
+        policy_path = Path(path).resolve()
+        directory = policy_path.parent
+        if not directory.is_dir() or not os.access(directory, os.W_OK):
+            return None
+        # Validation callers may pass a script path solely to supply file stats.
+        # Confirm this is the policy itself before creating any alert state.
+        with policy_path.open("rb") as handle:
+            if json.load(handle) != raw:
+                return None
+        return directory
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
 def validate_app_policy(
     raw: Any,
     path: str | os.PathLike[str],
     *,
     file_stat: os.stat_result | None = None,
+    emit_skipped_alerts: bool = True,
 ) -> AppPolicy:
-    """Validate one JSON export and return an immutable app-policy view."""
+    """Validate one JSON export and return an immutable app-policy view.
+
+    Skipped-lane alerts require emit_skipped_alerts=True and a path containing this
+    policy export in an existing writable directory. Other paths are read-only.
+    """
 
     root = _require_mapping(raw, "root")
     if root.get("schema") != 1:
@@ -259,14 +333,68 @@ def validate_app_policy(
     if declared_sha != canonical_app_policy_sha256(backends, lanes):
         raise ConfigurationError("app policy sha does not match canonical app policy")
     release = _require_string(root.get("release"), "release")
-    for name, backend in backends.items():
-        if not isinstance(name, str) or not name:
-            raise ConfigurationError("app policy backend names must be non-empty strings")
-        _validate_backend(name, backend)
+    loaded_lanes: dict[str, Mapping[str, Any]] = {}
+    loaded_backends: dict[str, Mapping[str, Any]] = {}
+    lane_statuses: dict[str, Mapping[str, Any]] = {}
+    alert_directory: Path | None = None
+    alert_directory_checked = False
     for lane_name, lane_raw in lanes.items():
+        reason: str | None = None
         if not isinstance(lane_name, str) or not lane_name:
-            raise ConfigurationError("app policy lane names must be non-empty strings")
-        _validate_lane(lane_name, lane_raw, backends)
+            reason = "invalid_lane"
+        elif not isinstance(lane_raw, dict):
+            reason = "invalid_lane"
+        elif lane_raw.get("lane_kind", "chat") not in {"chat", "decision"}:
+            reason = "unknown_lane_kind"
+        else:
+            chain = lane_raw.get("backend_chain")
+            if not isinstance(chain, list) or not chain or not all(isinstance(item, str) and item for item in chain):
+                reason = "invalid_lane"
+            else:
+                for backend_name in chain:
+                    backend_raw = backends.get(backend_name) if isinstance(backend_name, str) else None
+                    if backend_raw is None:
+                        continue
+                    dialect = (
+                        backend_raw.get("transport", {}).get("dialect")
+                        if isinstance(backend_raw, dict) and isinstance(backend_raw.get("transport"), dict)
+                        else None
+                    )
+                    if dialect not in _PAYLOAD_KEYS_BY_DIALECT:
+                        reason = "unknown_dialect"
+                        break
+            try:
+                if reason is None:
+                    for backend_name in chain if isinstance(chain, list) else ():
+                        _validate_backend(backend_name, backends.get(backend_name))
+                    _validate_lane(lane_name, lane_raw, backends)
+            except ConfigurationError:
+                reason = "invalid_lane"
+        if reason is None:
+            loaded_lanes[lane_name] = lane_raw
+            lane_statuses[lane_name] = MappingProxyType({"valid": True, "reason": None})
+            for backend_name in lane_raw["backend_chain"]:
+                loaded_backends[backend_name] = backends[backend_name]
+        else:
+            lane_statuses[str(lane_name)] = MappingProxyType({"valid": False, "reason": reason})
+            if emit_skipped_alerts and not alert_directory_checked:
+                alert_directory = _skipped_alert_directory(path, raw)
+                alert_directory_checked = True
+            if alert_directory is not None:
+                event = {
+                    "type": "policy_lane_skipped",
+                    "reason": reason,
+                    "backend": "",
+                    "policy_sha256": declared_sha,
+                    "release": release,
+                    "correlation_id": "",
+                }
+                try:
+                    emit_alert(alert_directory, event)
+                except Exception:
+                    pass
+    if not loaded_lanes:
+        raise ConfigurationError("app policy has no valid app lanes")
     if file_stat is None:
         try:
             with Path(path).open("rb") as handle:
@@ -275,13 +403,14 @@ def validate_app_policy(
             raise ConfigurationError("app policy cannot be statted") from exc
     return AppPolicy(
         path=Path(path),
-        app_backends=MappingProxyType({name: MappingProxyType(dict(value)) for name, value in backends.items()}),
-        app_lanes=MappingProxyType({name: MappingProxyType(dict(value)) for name, value in lanes.items()}),
+        app_backends=MappingProxyType({name: MappingProxyType(dict(value)) for name, value in loaded_backends.items()}),
+        app_lanes=MappingProxyType({name: MappingProxyType(dict(value)) for name, value in loaded_lanes.items()}),
         sha256=declared_sha,
         release=release,
         loaded_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         mtime_ns=file_stat.st_mtime_ns,
         file_size=file_stat.st_size,
+        lane_statuses=MappingProxyType(lane_statuses),
     )
 
 
@@ -356,7 +485,7 @@ class RuntimePolicy:
             with self.path.open("rb") as handle:
                 stat = os.fstat(handle.fileno())
                 raw = json.load(handle)
-            return validate_app_policy(raw, self.path, file_stat=stat)
+            return validate_app_policy(raw, self.path, file_stat=stat, emit_skipped_alerts=False)
         except Exception:
             raise RouteUnavailable("no valid promoted app policy is available") from None
 

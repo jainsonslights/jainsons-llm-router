@@ -49,11 +49,19 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 class _DispatchFailure(Exception):
-    def __init__(self, reason: str, *, ambiguous: bool = False, pre_dispatch: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        ambiguous: bool = False,
+        pre_dispatch: bool = False,
+        status: int | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.ambiguous = ambiguous
         self.pre_dispatch = pre_dispatch
+        self.status = status
 
 
 def _opener() -> Any:
@@ -144,11 +152,12 @@ def _perform_request(endpoint: str, key: str, payload: Mapping[str, Any], deadli
     try:
         response = _opener().open(request, timeout=remaining)
     except urllib.error.HTTPError as exc:
+        status = int(getattr(exc, "code", 0) or 0)
         try:
             exc.close()
         except Exception:
             pass
-        raise _DispatchFailure("http_error", ambiguous=True) from None
+        raise _DispatchFailure("http_error", ambiguous=True, status=status) from None
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", None)
         refused = isinstance(reason, ConnectionRefusedError) or getattr(reason, "errno", None) == errno.ECONNREFUSED
@@ -171,7 +180,7 @@ def _perform_request(endpoint: str, key: str, payload: Mapping[str, Any], deadli
             response.close()
         except Exception:
             pass
-        raise _DispatchFailure("http_error", ambiguous=True)
+        raise _DispatchFailure("http_error", ambiguous=True, status=status)
     raw = _read_response(response, deadline)
     try:
         parsed = json.loads(raw.decode("utf-8"))
@@ -284,6 +293,8 @@ def complete_chat(
     runtime = get_runtime_policy(policy_path)
     policy = runtime.get()
     lane = policy.lane(type)
+    if lane.get("lane_kind", "chat") != "chat":
+        raise RouteUnavailable("requested app lane is not a chat lane")
     clean_messages, input_chars = _validate_messages(messages, int(lane["max_input_chars"]))
     ceiling_tokens = int(lane["max_output_tokens"])
     output_tokens = ceiling_tokens if max_output_tokens is None else max(1, min(int(max_output_tokens), ceiling_tokens))
@@ -407,18 +418,29 @@ def app_policy_status(type: str = "chat_fast", *, policy_path: str | os.PathLike
     runtime = get_runtime_policy(policy_path)
     try:
         policy = runtime.read_only() if light else runtime.get()
-        lane = policy.lane(type)
     except Exception:
         return {
             "package_version": __version__, "policy_path": str(runtime.path), "valid": False,
             "sha": "", "release": "", "loaded_at": None, "backends": [],
-            "spent_today_usd": 0.0, "cap_usd": None,
+            "spent_today_usd": 0.0, "cap_usd": None, "lanes": {}, "lane_status": None,
+        }
+    lanes = {name: dict(status) for name, status in policy.lane_statuses.items()}
+    selected_status = lanes.get(type, {"valid": False, "reason": "unknown_lane"})
+    try:
+        lane = policy.lane(type)
+    except Exception:
+        return {
+            "package_version": __version__, "policy_path": str(policy.path), "valid": False,
+            "sha": policy.sha256, "release": policy.release, "loaded_at": policy.loaded_at,
+            "backends": [], "spent_today_usd": 0.0, "cap_usd": None,
+            "lanes": lanes, "lane_status": selected_status,
         }
     if not light and runtime.last_load_failed:
         return {
             "package_version": __version__, "policy_path": str(runtime.path), "valid": False,
             "sha": "", "release": "", "loaded_at": None, "backends": [],
             "spent_today_usd": 0.0, "cap_usd": None,
+            "lanes": lanes, "lane_status": selected_status,
         }
     try:
         backends = [
@@ -432,12 +454,14 @@ def app_policy_status(type: str = "chat_fast", *, policy_path: str | os.PathLike
             "package_version": __version__, "policy_path": str(runtime.path), "valid": False,
             "sha": "", "release": "", "loaded_at": None, "backends": [],
             "spent_today_usd": 0.0, "cap_usd": None,
+            "lanes": lanes, "lane_status": selected_status,
         }
     return {
         "package_version": __version__, "policy_path": str(policy.path), "valid": True,
         "sha": policy.sha256, "release": policy.release, "loaded_at": policy.loaded_at,
         "backends": backends, "spent_today_usd": spent,
         "cap_usd": float(cap) if isinstance(cap, (int, float)) and not isinstance(cap, bool) else None,
+        "lanes": lanes, "lane_status": selected_status,
     }
 
 

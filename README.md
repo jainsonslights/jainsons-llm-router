@@ -67,6 +67,36 @@ python -m pip install -e '.[test]'
 pytest
 ```
 
+## Typed application decisions
+
+Promoted application policy may declare a `decision` lane. Apps select its
+policy type, never a backend or model:
+
+```python
+from jainsons_llm_router import decide_or
+
+result = decide_or(
+    state,
+    questions,
+    fallback,
+    type="decide_fast",
+    profile="default",
+)
+```
+
+`fallback(names: list[str]) -> dict[str, value]` receives the names of answers
+that were not confident. If dispatch itself fails it receives `list(questions)`
+to supply all answers. Noul answers have boolean values (`p >= 0.5`); fallbacks
+must also supply booleans for noul questions or raise `ConfigurationError`.
+`decide()` includes the probability as `p` and confidence as `max(p, 1-p)`.
+Noul answers are confident when `p >= threshold` or `p <= 1-threshold`.
+Choice probability totals may differ from one by at most `1e-3`.
+Each `decide_or()` result is marked `source="decide"` or
+`source="fallback"`; application code must use this shared fallback path
+rather than sending a second provider request directly. The router masks the
+bounded PII classes in decision state before dispatch and never logs state,
+questions, provider bodies, or credentials.
+
 ## Minimal free-only example
 
 ```python
