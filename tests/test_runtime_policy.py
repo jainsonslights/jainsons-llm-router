@@ -140,7 +140,7 @@ def test_loads_harness_shaped_promoted_policy_and_reports_redacted_status(tmp_pa
     assert policy.release == "V85"
     assert tuple(policy.app_lanes["chat_fast"]["backend_chain"]) == ("deepseek-direct-flash", "glm-openrouter-flash")
     status = app_policy_status(policy_path=path)
-    assert status["package_version"] == "0.6.0"
+    assert status["package_version"] == "0.6.1"
     assert status["backends"] == [
         {"name": "deepseek-direct-flash", "key_present": True},
         {"name": "glm-openrouter-flash", "key_present": False},

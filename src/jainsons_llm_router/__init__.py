@@ -137,4 +137,4 @@ __all__ = [
     "set_alert_sink",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"

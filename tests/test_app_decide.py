@@ -125,7 +125,6 @@ def test_decide_masks_pii_builds_bound_payload_and_parses_confidence(tmp_path, m
     [
         lambda response: response["answers"]["category"].update(type="noul"),
         lambda response: response["answers"]["category"].update(choice="other"),
-        lambda response: response["answers"]["category"].update(probabilities={"sales": 1.0}),
         lambda response: response["answers"]["category"].update(extra="unexpected"),
         lambda response: response["answers"]["hot"].update(noul=1.2),
         lambda response: response["answers"]["hot"].update(confidence=0.9),
@@ -140,6 +139,37 @@ def test_malformed_provider_answers_raise_provider_failure(tmp_path, monkeypatch
     monkeypatch.setattr(app_decide, "_perform_request", lambda *_args: response)
     with pytest.raises(ProviderFailure):
         decide("safe state", QUESTIONS, policy_path=path)
+
+
+def _choice_parse_response(probabilities):
+    return {
+        "answers": {
+            "category": {
+                "type": "choice",
+                "choice": "sales",
+                "probabilities": probabilities,
+                "confidence": 0.9,
+            }
+        }
+    }
+
+
+def test_choice_probabilities_accept_missing_zero_option():
+    answers = app_decide._parse_answers(
+        _choice_parse_response({"sales": 1.0}),
+        {"category": QUESTIONS["category"]},
+        0.8,
+    )
+    assert answers["category"]["probabilities"] == {"sales": 1.0, "service": 0.0}
+
+
+def test_choice_probabilities_reject_extra_option():
+    with pytest.raises(ProviderFailure, match="malformed choice probabilities"):
+        app_decide._parse_answers(
+            _choice_parse_response({"sales": 0.95, "service": 0.05, "other": 0.0}),
+            {"category": QUESTIONS["category"]},
+            0.8,
+        )
 
 
 def test_question_and_profile_validation_happens_before_network(tmp_path, monkeypatch):
@@ -263,18 +293,21 @@ def test_decide_or_rejects_non_boolean_noul_fallbacks(tmp_path, monkeypatch, fai
         decide_or("safe", QUESTIONS, lambda names: {"category": "sales", "hot": value}, policy_path=path)
 
 
-@pytest.mark.parametrize("total", [0.999, 0.9995, 1.0, 1.0005, 1.001])
-def test_choice_probability_sum_tolerates_rounding(tmp_path, monkeypatch, total):
+@pytest.mark.parametrize("total", [0.98, 1.0, 1.02])
+def test_choice_probability_sum_tolerates_rounding_and_normalises(tmp_path, monkeypatch, total):
     path = policy_file(tmp_path)
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     response = good_response()
     probabilities = {"sales": 0.5, "service": total - 0.5}
     response["answers"]["category"]["probabilities"] = probabilities
     monkeypatch.setattr(app_decide, "_perform_request", lambda *_args: response)
-    assert decide("safe", QUESTIONS, policy_path=path).answers["category"]["probabilities"] == probabilities
+    parsed = decide("safe", QUESTIONS, policy_path=path).answers["category"]["probabilities"]
+    assert sum(parsed.values()) == pytest.approx(1.0)
+    assert parsed["sales"] == pytest.approx(probabilities["sales"] / total)
+    assert parsed["service"] == pytest.approx(probabilities["service"] / total)
 
 
-@pytest.mark.parametrize("total", [0.9989, 1.0011])
+@pytest.mark.parametrize("total", [0.9, 1.1])
 def test_choice_probability_sum_outside_tolerance_is_rejected(tmp_path, monkeypatch, total):
     path = policy_file(tmp_path)
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")

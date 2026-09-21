@@ -121,11 +121,18 @@ def _parse_answers(
             probabilities_raw = raw.get("probabilities")
             if not isinstance(value, str) or value not in criteria or not isinstance(probabilities_raw, dict):
                 raise ProviderFailure("decision provider returned a malformed choice")
-            if set(probabilities_raw) != set(criteria):
+            if set(probabilities_raw) - set(criteria):
                 raise ProviderFailure("decision provider returned malformed choice probabilities")
-            probabilities = {option: _probability(probability) for option, probability in probabilities_raw.items()}
-            if not 1.0 - 1e-3 <= sum(probabilities.values()) <= 1.0 + 1e-3:
+            probabilities = {
+                option: _probability(probabilities_raw.get(option, 0.0))
+                for option in criteria
+            }
+            probability_sum = sum(probabilities.values())
+            if probability_sum == 0 or not 0.95 <= probability_sum <= 1.05:
                 raise ProviderFailure("decision provider returned malformed choice probabilities")
+            probabilities = {
+                option: probability / probability_sum for option, probability in probabilities.items()
+            }
             confidence = _probability(raw.get("confidence"))
             answers[name] = {
                 "type": "choice",
