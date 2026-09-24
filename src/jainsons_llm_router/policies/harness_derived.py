@@ -26,10 +26,10 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = '77c5d9cc193091bd65233e9c3cb01ba374cbd8fff0afb02b093ea2786d6a43fd'
+HARNESS_POLICY_SHA256 = '8cf4bb94ea95479f8fa4217de804872ed161afa16e0adb8dbf6ab7bdb19656ce'
 HARNESS_FREE_CHECK_SHA256 = '012725adf46246795134fe835f9be6c4ebefd6304f3c276003265fd7cc37186b'
 DEFAULT_LANE = 'research'
-AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'glm', 'kimi', 'or-best'))
+AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'glm', 'kimi', 'or-best'))
 GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS
 
 BACKENDS = MappingProxyType({
@@ -45,7 +45,12 @@ BACKENDS = MappingProxyType({
     ),
     'claude-opus': HarnessBackendPolicy(
         name='claude-opus', kind='sub-anthropic', funding='subscription',
-        billing_class=BillingClass.FREE, model='claude-opus-5',
+        billing_class=BillingClass.FREE, model='claude-opus-5-5',
+        model_source='harness routing export', automatic_enabled=False,
+    ),
+    'claude-sonnet': HarnessBackendPolicy(
+        name='claude-sonnet', kind='sub-anthropic', funding='subscription',
+        billing_class=BillingClass.FREE, model='claude-sonnet-5',
         model_source='harness routing export', automatic_enabled=False,
     ),
     'codex': HarnessBackendPolicy(
@@ -60,12 +65,12 @@ BACKENDS = MappingProxyType({
     ),
     'codex-luna': HarnessBackendPolicy(
         name='codex-luna', kind='sub', funding='subscription',
-        billing_class=BillingClass.FREE, model='gpt-5.6-luna',
+        billing_class=BillingClass.FREE, model='gpt-6-luna',
         model_source='harness routing export', automatic_enabled=True,
     ),
     'codex-sol': HarnessBackendPolicy(
         name='codex-sol', kind='sub', funding='subscription',
-        billing_class=BillingClass.FREE, model='gpt-5.6-sol',
+        billing_class=BillingClass.FREE, model='gpt-6-sol',
         model_source='harness routing export', automatic_enabled=True,
     ),
     'glm': HarnessBackendPolicy(
