@@ -26,10 +26,10 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = '8cf4bb94ea95479f8fa4217de804872ed161afa16e0adb8dbf6ab7bdb19656ce'
+HARNESS_POLICY_SHA256 = 'bbbde9342e722f54728c61f034e956bf2ee4e9a02a752488360aaf23070a833e'
 HARNESS_FREE_CHECK_SHA256 = '012725adf46246795134fe835f9be6c4ebefd6304f3c276003265fd7cc37186b'
 DEFAULT_LANE = 'research'
-AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'glm', 'kimi', 'or-best'))
+AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'codex-astra', 'codex-terra', 'glm', 'kimi', 'omni-diverse', 'omni-fast', 'or-best', 'or-free-gemma4', 'or-free-ling'))
 GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS
 
 BACKENDS = MappingProxyType({
@@ -61,7 +61,7 @@ BACKENDS = MappingProxyType({
     'codex-astra': HarnessBackendPolicy(
         name='codex-astra', kind='sub', funding='subscription',
         billing_class=BillingClass.FREE, model='gpt-6-astra',
-        model_source='harness routing export', automatic_enabled=True,
+        model_source='harness routing export', automatic_enabled=False,
     ),
     'codex-luna': HarnessBackendPolicy(
         name='codex-luna', kind='sub', funding='subscription',
@@ -72,6 +72,16 @@ BACKENDS = MappingProxyType({
         name='codex-sol', kind='sub', funding='subscription',
         billing_class=BillingClass.FREE, model='gpt-6-sol',
         model_source='harness routing export', automatic_enabled=True,
+    ),
+    'codex-sol-web': HarnessBackendPolicy(
+        name='codex-sol-web', kind='sub', funding='subscription',
+        billing_class=BillingClass.FREE, model='gpt-6-sol',
+        model_source='harness routing export', automatic_enabled=True,
+    ),
+    'codex-terra': HarnessBackendPolicy(
+        name='codex-terra', kind='sub', funding='subscription',
+        billing_class=BillingClass.FREE, model='gpt-5.6-terra',
+        model_source='harness routing export', automatic_enabled=False,
     ),
     'glm': HarnessBackendPolicy(
         name='glm', kind='sub-glm', funding='subscription',
@@ -91,12 +101,12 @@ BACKENDS = MappingProxyType({
     'omni-diverse': HarnessBackendPolicy(
         name='omni-diverse', kind='omni-free', funding='free_service',
         billing_class=BillingClass.FREE, model='omni-kiro-deepseek',
-        model_source='harness routing export', automatic_enabled=True,
+        model_source='harness routing export', automatic_enabled=False,
     ),
     'omni-fast': HarnessBackendPolicy(
         name='omni-fast', kind='omni-free', funding='free_service',
         billing_class=BillingClass.FREE, model='omni-groq-llama',
-        model_source='harness routing export', automatic_enabled=True,
+        model_source='harness routing export', automatic_enabled=False,
     ),
     'or-best': HarnessBackendPolicy(
         name='or-best', kind='API$$', funding='paid_api',
@@ -106,7 +116,7 @@ BACKENDS = MappingProxyType({
     'or-free-gemma4': HarnessBackendPolicy(
         name='or-free-gemma4', kind='or-free', funding='free_service',
         billing_class=BillingClass.FREE, model='google/gemma-4-31b-it:free',
-        model_source='harness routing export', automatic_enabled=True,
+        model_source='harness routing export', automatic_enabled=False,
     ),
     'or-free-laguna-s': HarnessBackendPolicy(
         name='or-free-laguna-s', kind='or-free', funding='free_service',
@@ -121,7 +131,7 @@ BACKENDS = MappingProxyType({
     'or-free-ling': HarnessBackendPolicy(
         name='or-free-ling', kind='or-free', funding='free_service',
         billing_class=BillingClass.FREE, model='inclusionai/ling-3.0-flash:free',
-        model_source='harness routing export', automatic_enabled=True,
+        model_source='harness routing export', automatic_enabled=False,
     ),
     'or-free-nemotron': HarnessBackendPolicy(
         name='or-free-nemotron', kind='or-free', funding='free_service',
@@ -136,39 +146,39 @@ BACKENDS = MappingProxyType({
 })
 
 LANE_BACKEND_ORDER = MappingProxyType({
-    'code': ('codex', 'kimi'),
-    'domain_ops': ('agy', 'codex'),
+    'code': ('codex-sol', 'codex-luna'),
+    'domain_ops': ('agy', 'codex-luna'),
     'image_gen': ('agy', 'agy'),
-    'legal_finance': ('claude', 'codex'),
-    'planning': ('claude', 'codex'),
-    'research': ('agy', 'codex'),
-    'ui': ('kimi', 'codex'),
+    'legal_finance': ('claude', 'codex-sol-web'),
+    'planning': ('claude', 'codex-sol'),
+    'research': ('codex-sol-web', 'agy'),
+    'ui': ('codex-sol', 'codex-luna'),
     'vision': ('agy', 'agy'),
-    'writing': ('codex', 'agy'),
+    'writing': ('codex-luna', 'agy'),
 })
 
 FREE_CANDIDATE_BACKENDS_BY_LANE = MappingProxyType({
-    'code': ('or-free-ling',),
+    'code': (),
     'domain_ops': (),
     'image_gen': (),
     'legal_finance': (),
     'planning': (),
-    'research': ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code', 'or-free-ling', 'or-free-gemma4'),
-    'ui': ('or-free-ling',),
+    'research': ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code'),
+    'ui': (),
     'vision': (),
-    'writing': ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code', 'or-free-ling', 'or-free-gemma4'),
+    'writing': ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code'),
 })
 
 HTTP_CHAIN_BY_LANE = MappingProxyType({
-    'code': ('or-free-ling',),
+    'code': (),
     'domain_ops': (),
     'image_gen': (),
     'legal_finance': (),
     'planning': (),
-    'research': ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code', 'or-free-ling', 'or-free-gemma4'),
-    'ui': ('or-free-ling',),
+    'research': ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code'),
+    'ui': (),
     'vision': (),
-    'writing': ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code', 'or-free-ling', 'or-free-gemma4'),
+    'writing': ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code'),
 })
 
 OPENROUTER_FREE_BACKENDS = ('or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code', 'or-free-ling', 'or-free-gemma4')
