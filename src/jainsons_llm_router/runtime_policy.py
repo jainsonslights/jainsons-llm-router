@@ -163,10 +163,26 @@ def _validate_payload_defaults(
         raise ConfigurationError(f"app policy {path} contains an unsupported value")
 
 
+def _is_openrouter_free_model(model: str) -> bool:
+    """Free OpenRouter models are identified by suffix, stealth namespace, or harness or-free routes.
+
+    Since harness V101 a model can be free without the ``:free`` suffix (stealth models), so the
+    suffix alone no longer keeps free models out of app (customer) lanes.
+    """
+    bare = model.removeprefix("openrouter/")
+    if bare.endswith(":free") or bare.startswith("stealth/"):
+        return True
+    from .policies import harness_derived  # local import: avoid loading the generated policy at import time
+    return any(
+        policy.kind == "or-free" and policy.model and policy.model.removeprefix("openrouter/") == bare
+        for policy in harness_derived.BACKENDS.values()
+    )
+
+
 def _validate_backend(name: str, raw: Any) -> None:
     backend = _require_mapping(raw, f"app_backends[{name!r}]")
     model = _require_string(backend.get("model"), f"app_backends[{name!r}].model")
-    if model.endswith(":free"):
+    if _is_openrouter_free_model(model):
         raise ConfigurationError("app policy may not route an OpenRouter free model")
     transport = _require_mapping(backend.get("transport"), f"app_backends[{name!r}].transport")
     dialect = transport.get("dialect")

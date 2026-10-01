@@ -130,7 +130,6 @@ def _lane_candidates(lane: str) -> tuple[Candidate, ...]:
             or not policy.automatic_enabled
             or policy.billing_class is not BillingClass.FREE
             or not policy.model
-            or not policy.model.endswith(":free")
         ):
             continue
         candidates.append(Candidate(
