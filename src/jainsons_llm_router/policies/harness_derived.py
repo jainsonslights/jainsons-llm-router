@@ -26,7 +26,7 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = 'ae459cf052ea16a108cad0e67100e209b3335309221ee8f5284f11c18680778c'
+HARNESS_POLICY_SHA256 = 'fb1eac2b08267e804130bda5929baab3fd2a62e6188d2880f46cb55eda8a581f'
 HARNESS_FREE_CHECK_SHA256 = '3e4fa4fc8a1c646335b70b7df34be556238ed4cd52eda6a072873c0ea60037af'
 DEFAULT_LANE = 'research'
 AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'codex-astra', 'codex-terra', 'glm', 'kimi', 'omni-diverse', 'omni-fast', 'or-best', 'or-free-gemma4', 'or-free-ling'))
@@ -70,12 +70,12 @@ BACKENDS = MappingProxyType({
     ),
     'codex-sol': HarnessBackendPolicy(
         name='codex-sol', kind='sub', funding='subscription',
-        billing_class=BillingClass.FREE, model='gpt-6-sol',
+        billing_class=BillingClass.FREE, model='gpt-6.1-sol',
         model_source='harness routing export', automatic_enabled=True,
     ),
     'codex-sol-web': HarnessBackendPolicy(
         name='codex-sol-web', kind='sub', funding='subscription',
-        billing_class=BillingClass.FREE, model='gpt-6-sol',
+        billing_class=BillingClass.FREE, model='gpt-6.1-sol',
         model_source='harness routing export', automatic_enabled=True,
     ),
     'codex-terra': HarnessBackendPolicy(
