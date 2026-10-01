@@ -141,3 +141,17 @@ def test_module_import_has_no_router_or_cli_side_effects() -> None:
     completed = subprocess.run([sys.executable, "-c", "import jainsons_llm_router.client as client; assert client._ROUTERS == {}; print('import-clean')"], check=True, capture_output=True, text=True, env={**os.environ, "PYTHONPATH": pythonpath})
     assert completed.stdout.strip() == "import-clean"
     assert completed.stderr == ""
+
+
+def test_suffixless_stealth_or_free_backend_is_a_candidate_and_still_live_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Harness V101: a stealth model is free without the ":free" suffix; the live price check decides.
+    _set_http_policy(monkeypatch)
+    policies = dict(client.harness_derived.BACKENDS)
+    policies["or-free-space-bunny"] = _policy("or-free-space-bunny", "or-free", "stealth/space-bunny-alpha")
+    monkeypatch.setattr(client.harness_derived, "BACKENDS", policies)
+    chains = dict(client.harness_derived.HTTP_CHAIN_BY_LANE)
+    chains["research"] = ("or-free-space-bunny", "or-free-ling")
+    monkeypatch.setattr(client.harness_derived, "HTTP_CHAIN_BY_LANE", chains, raising=False)
+    monkeypatch.setattr(client.free_check, "model_is_free", lambda model: True)
+    providers = [candidate.provider for candidate in client._lane_candidates("research")]
+    assert providers == ["or-free-space-bunny", "or-free-ling"]

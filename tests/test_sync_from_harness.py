@@ -135,13 +135,17 @@ def test_openrouter_prefixed_or_free_model_is_rejected_without_writing(tmp_path:
 
 
 def test_generated_free_order_excludes_cli_and_non_free_models(monkeypatch: pytest.MonkeyPatch) -> None:
-    model = harness_derived.BACKENDS["or-free-ling"].model
+    # Use whichever OpenRouter-free backend the generated policy lists first for research;
+    # the harness retires and adds free routes over time (or-free-ling was retired in V96).
+    name = next(n for n in harness_derived.FREE_CANDIDATE_BACKENDS_BY_LANE["research"]
+                if harness_derived.BACKENDS[n].kind == "or-free")
+    model = harness_derived.BACKENDS[name].model
     assert model is not None
     monkeypatch.setattr(harness_derived.free_check, "model_is_free", lambda value: value == model)
     order = harness_derived.free_candidate_backend_order("research")
-    assert order == ("or-free-ling",)
+    assert order == (name,)
     candidates = {
         "codex": Candidate("codex", "gpt-5.6-terra", "test", BillingClass.FREE, "codex", zero_marginal_cost=True),
-        "or-free-ling": Candidate("or-free-ling", model, "test", BillingClass.FREE, "or-free-ling", zero_marginal_cost=True),
+        name: Candidate(name, model, "test", BillingClass.FREE, name, zero_marginal_cost=True),
     }
-    assert harness_derived.order_free_candidates("research", candidates) == (candidates["or-free-ling"],)
+    assert harness_derived.order_free_candidates("research", candidates) == (candidates[name],)

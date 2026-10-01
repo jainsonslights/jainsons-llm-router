@@ -7,7 +7,7 @@ import json
 from typing import Any
 from urllib.request import Request, urlopen
 
-PORTED_FROM_HARNESS_SHA256 = "012725adf46246795134fe835f9be6c4ebefd6304f3c276003265fd7cc37186b"  # harness openrouter_free_catalog._openrouter_model_is_free (V82)
+PORTED_FROM_HARNESS_SHA256 = "3e4fa4fc8a1c646335b70b7df34be556238ed4cd52eda6a072873c0ea60037af"  # harness openrouter_free_catalog._openrouter_model_is_free (V101)
 _MODELS_URL = "https://openrouter.ai/api/v1/models"
 def _fetch_models() -> tuple[dict[str, Any], ...] | None:
     """Fetch and validate a fresh catalog payload; catalog failures fail closed.
@@ -20,9 +20,10 @@ def _fetch_models() -> tuple[dict[str, Any], ...] | None:
         with urlopen(request, timeout=10) as response:  # noqa: S310 - fixed HTTPS API URL
             payload = json.loads(response.read().decode("utf-8"))
         data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        if not isinstance(data, list):
             return None
-        return tuple(data)
+        # Mirrors the harness: unrelated malformed entries are ignored, never matched.
+        return tuple(item for item in data if isinstance(item, dict))
     except Exception:  # Network and catalog errors must never make a model eligible.
         return None
 
@@ -50,17 +51,23 @@ def _has_unambiguous_zero_io_pricing(pricing: Any) -> bool:
 
 
 def model_is_free(model_id: str) -> bool:
-    """Whether OpenRouter currently declares exactly this ``:free`` model free.
+    """Whether OpenRouter currently declares exactly this model free.
 
-    This ports the harness check: model IDs must have the suffix, catalog lookup
-    must be unambiguous, and both prompt and completion pricing must be zero.
+    This ports the harness check (V101): a ``:free`` suffix is not pricing
+    evidence (stealth models can be free without it), so only the live catalog
+    decides. An ``openrouter/`` prefix is dropped as in the harness, catalog
+    lookup must be unambiguous, and both prompt and completion pricing must be
+    exactly zero.
     """
-    if not isinstance(model_id, str) or not model_id.endswith(":free"):
+    if not isinstance(model_id, str):
+        return False
+    requested_id = model_id.removeprefix("openrouter/")
+    if not requested_id or requested_id == ":free":
         return False
     models = _fetch_models()
     if models is None:
         return False
-    matches = [model for model in models if model.get("id") == model_id]
+    matches = [model for model in models if model.get("id") == requested_id]
     if len(matches) != 1:
         return False
     return _has_unambiguous_zero_io_pricing(matches[0].get("pricing"))

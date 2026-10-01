@@ -163,6 +163,9 @@ def test_loads_harness_shaped_promoted_policy_and_reports_redacted_status(tmp_pa
         lambda policy: policy["app_backends"]["deepseek-direct-flash"]["transport"].update(payload_defaults={"thinking": {"type": "x" * 65}}),
         lambda policy: policy["app_backends"]["deepseek-direct-flash"].update(model=""),
         lambda policy: policy["app_backends"]["deepseek-direct-flash"].update(model="model:free"),
+        # Since harness V101 free models can lack the suffix: stealth and harness or-free models stay banned.
+        lambda policy: policy["app_backends"]["deepseek-direct-flash"].update(model="stealth/space-bunny-alpha"),
+        lambda policy: policy["app_backends"]["deepseek-direct-flash"].update(model="openrouter/stealth/space-bunny-alpha"),
         lambda policy: policy["app_backends"]["deepseek-direct-flash"].pop("price_card"),
         lambda policy: policy["app_lanes"]["chat_fast"].update(backend_chain=["not-declared"]),
     ],
@@ -376,3 +379,19 @@ def test_unknown_backend_dialect_skips_only_its_referencing_lane(tmp_path):
     assert set(loaded.app_lanes) == {"chat_fast"}
     assert loaded.lane_statuses["future_lane"] == {"valid": False, "reason": "unknown_dialect"}
     assert "future-backend" not in loaded.app_backends
+
+
+# Pinned customer-lane models (owner-approved app policy as of 2026-10-01). Until an approved-model
+# allowlist or a live price check exists on app dispatch, any change here must be a deliberate,
+# owner-approved edit of this list. A zero-priced OpenRouter model must never slip into these lanes.
+PINNED_APP_MODELS = frozenset({"deepseek-flash", "deepseek/deepseek-v4.1-flash", "typesafe/jev-1.13"})
+_LIVE_APP_POLICY = Path("/opt/aria-brain/data/llm_router/policy.json")
+
+
+def test_customer_lane_models_stay_on_the_pinned_list() -> None:
+    # Checks the LIVE app policy on the hub (the repo fixture is synthetic and includes test-only backends).
+    if not _LIVE_APP_POLICY.is_file():
+        pytest.skip("live app policy is only present on the hub")
+    policy = json.loads(_LIVE_APP_POLICY.read_text(encoding="utf-8"))
+    models = {backend["model"] for backend in policy.get("app_backends", {}).values()}
+    assert models <= PINNED_APP_MODELS, f"unapproved customer-lane model(s): {sorted(models - PINNED_APP_MODELS)}"
