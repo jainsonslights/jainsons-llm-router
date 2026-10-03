@@ -7,7 +7,7 @@ import json
 from typing import Any
 from urllib.request import Request, urlopen
 
-PORTED_FROM_HARNESS_SHA256 = "3e4fa4fc8a1c646335b70b7df34be556238ed4cd52eda6a072873c0ea60037af"  # harness openrouter_free_catalog._openrouter_model_is_free (V101)
+PORTED_FROM_HARNESS_SHA256 = "f7acf1713e37a0139eff17c9f04b51036c8af2400cbfb315bc02960f4e1e7b73"  # harness openrouter_free_catalog._openrouter_model_is_free (V121: strict catalog JSON)
 _MODELS_URL = "https://openrouter.ai/api/v1/models"
 def _fetch_models() -> tuple[dict[str, Any], ...] | None:
     """Fetch and validate a fresh catalog payload; catalog failures fail closed.
