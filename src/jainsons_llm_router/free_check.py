@@ -7,8 +7,32 @@ import json
 from typing import Any
 from urllib.request import Request, urlopen
 
-PORTED_FROM_HARNESS_SHA256 = "3e4fa4fc8a1c646335b70b7df34be556238ed4cd52eda6a072873c0ea60037af"  # harness openrouter_free_catalog._openrouter_model_is_free (V101)
+PORTED_FROM_HARNESS_SHA256 = "f7acf1713e37a0139eff17c9f04b51036c8af2400cbfb315bc02960f4e1e7b73"  # harness openrouter_free_catalog._openrouter_model_is_free (V121: strict catalog JSON)
 _MODELS_URL = "https://openrouter.ai/api/v1/models"
+_MAX_CATALOG_BYTES = 8 * 1024 * 1024
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"non-finite JSON constant: {name}")
+
+
+def _loads_strict(data: bytes) -> Any:
+    """Mirror harness V121 loads_provider: bounded, duplicate-free, finite JSON."""
+    if len(data) > _MAX_CATALOG_BYTES:
+        raise ValueError("catalog JSON is too large")
+    return json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object,
+                      parse_constant=_reject_constant)
+
+
 def _fetch_models() -> tuple[dict[str, Any], ...] | None:
     """Fetch and validate a fresh catalog payload; catalog failures fail closed.
 
@@ -18,7 +42,7 @@ def _fetch_models() -> tuple[dict[str, Any], ...] | None:
     try:
         request = Request(_MODELS_URL, headers={"Accept": "application/json"})
         with urlopen(request, timeout=10) as response:  # noqa: S310 - fixed HTTPS API URL
-            payload = json.loads(response.read().decode("utf-8"))
+            payload = _loads_strict(response.read())
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
             return None
