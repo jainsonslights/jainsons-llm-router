@@ -26,8 +26,8 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = 'fb1eac2b08267e804130bda5929baab3fd2a62e6188d2880f46cb55eda8a581f'
-HARNESS_FREE_CHECK_SHA256 = '3e4fa4fc8a1c646335b70b7df34be556238ed4cd52eda6a072873c0ea60037af'
+HARNESS_POLICY_SHA256 = '0926959cc5a1f21b42153d5155f24b137838af151372f078e4a7e5949f7675e0'
+HARNESS_FREE_CHECK_SHA256 = 'f7acf1713e37a0139eff17c9f04b51036c8af2400cbfb315bc02960f4e1e7b73'
 DEFAULT_LANE = 'research'
 AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'codex-astra', 'codex-terra', 'glm', 'kimi', 'omni-diverse', 'omni-fast', 'or-best', 'or-free-gemma4', 'or-free-ling'))
 GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS
