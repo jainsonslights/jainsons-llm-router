@@ -26,7 +26,7 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = '0926959cc5a1f21b42153d5155f24b137838af151372f078e4a7e5949f7675e0'
+HARNESS_POLICY_SHA256 = '0d6343fc9c1ab99433bdef1fe6c1e7ec32819a339ae57c268c2919064aa831cb'
 HARNESS_FREE_CHECK_SHA256 = 'f7acf1713e37a0139eff17c9f04b51036c8af2400cbfb315bc02960f4e1e7b73'
 DEFAULT_LANE = 'research'
 AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'codex-astra', 'codex-terra', 'glm', 'kimi', 'omni-diverse', 'omni-fast', 'or-best', 'or-free-gemma4', 'or-free-ling'))
