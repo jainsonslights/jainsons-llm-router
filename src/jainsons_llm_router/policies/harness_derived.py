@@ -26,7 +26,7 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = '0d6343fc9c1ab99433bdef1fe6c1e7ec32819a339ae57c268c2919064aa831cb'
+HARNESS_POLICY_SHA256 = 'dbaf790d2f5ab46b5887b5a18a5b85c8164b8664f191d84bd17c07abe5bf2b2c'
 HARNESS_FREE_CHECK_SHA256 = 'f7acf1713e37a0139eff17c9f04b51036c8af2400cbfb315bc02960f4e1e7b73'
 DEFAULT_LANE = 'research'
 AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'codex-astra', 'codex-terra', 'glm', 'kimi', 'omni-diverse', 'omni-fast', 'or-best', 'or-free-gemma4', 'or-free-ling'))
@@ -159,7 +159,8 @@ LANE_BACKEND_ORDER = MappingProxyType({
     'research': ('codex-sol-web', 'agy'),
     'ui': ('codex-sol', 'codex-luna'),
     'vision': ('agy', 'agy'),
-    'writing': ('codex-luna', 'agy'),
+    'visual_content': ('agy', 'codex-sol'),
+    'writing': ('codex-luna', 'codex-sol'),
 })
 
 FREE_CANDIDATE_BACKENDS_BY_LANE = MappingProxyType({
@@ -171,6 +172,7 @@ FREE_CANDIDATE_BACKENDS_BY_LANE = MappingProxyType({
     'research': ('or-free-space-bunny', 'or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code'),
     'ui': (),
     'vision': (),
+    'visual_content': (),
     'writing': ('or-free-space-bunny', 'or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code'),
 })
 
@@ -183,6 +185,7 @@ HTTP_CHAIN_BY_LANE = MappingProxyType({
     'research': ('or-free-space-bunny', 'or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code'),
     'ui': (),
     'vision': (),
+    'visual_content': (),
     'writing': ('or-free-space-bunny', 'or-free-nemotron', 'or-free-laguna-s', 'or-free-laguna-xs', 'or-free-north-code'),
 })
 
