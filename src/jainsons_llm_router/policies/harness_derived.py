@@ -26,10 +26,10 @@ class HarnessBackendPolicy:
     automatic_enabled: bool
 
 
-HARNESS_POLICY_SHA256 = 'dbaf790d2f5ab46b5887b5a18a5b85c8164b8664f191d84bd17c07abe5bf2b2c'
+HARNESS_POLICY_SHA256 = '2f9c6bc1051da565368c7d6183d282fab7bab97f55089920b558eb2e123e0095'
 HARNESS_FREE_CHECK_SHA256 = 'f7acf1713e37a0139eff17c9f04b51036c8af2400cbfb315bc02960f4e1e7b73'
 DEFAULT_LANE = 'research'
-AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'codex-astra', 'codex-terra', 'glm', 'kimi', 'omni-diverse', 'omni-fast', 'or-best', 'or-free-gemma4', 'or-free-ling'))
+AUTO_DISABLED_BACKENDS = frozenset(('claude', 'claude-opus', 'claude-sonnet', 'codex-astra', 'glm', 'kimi', 'omni-diverse', 'omni-fast', 'or-best', 'or-free-gemma4', 'or-free-ling'))
 GLM_AUTOMATIC_DISABLED = 'glm' in AUTO_DISABLED_BACKENDS
 
 BACKENDS = MappingProxyType({
@@ -55,7 +55,7 @@ BACKENDS = MappingProxyType({
     ),
     'codex': HarnessBackendPolicy(
         name='codex', kind='sub', funding='subscription',
-        billing_class=BillingClass.FREE, model='gpt-5.6-terra',
+        billing_class=BillingClass.FREE, model='gpt-6.1-terra',
         model_source='harness routing export', automatic_enabled=True,
     ),
     'codex-astra': HarnessBackendPolicy(
@@ -80,8 +80,8 @@ BACKENDS = MappingProxyType({
     ),
     'codex-terra': HarnessBackendPolicy(
         name='codex-terra', kind='sub', funding='subscription',
-        billing_class=BillingClass.FREE, model='gpt-5.6-terra',
-        model_source='harness routing export', automatic_enabled=False,
+        billing_class=BillingClass.FREE, model='gpt-6.1-terra',
+        model_source='harness routing export', automatic_enabled=True,
     ),
     'glm': HarnessBackendPolicy(
         name='glm', kind='sub-glm', funding='subscription',
@@ -151,16 +151,16 @@ BACKENDS = MappingProxyType({
 })
 
 LANE_BACKEND_ORDER = MappingProxyType({
-    'code': ('codex-sol', 'codex-luna'),
+    'code': ('codex-sol', 'codex-terra'),
     'domain_ops': ('agy', 'codex-luna'),
     'image_gen': ('agy', 'agy'),
     'legal_finance': ('claude', 'codex-sol-web'),
     'planning': ('claude', 'codex-sol'),
     'research': ('codex-sol-web', 'agy'),
-    'ui': ('codex-sol', 'codex-luna'),
+    'ui': ('codex-sol', 'codex-terra'),
     'vision': ('agy', 'agy'),
     'visual_content': ('agy', 'codex-sol'),
-    'writing': ('codex-luna', 'codex-sol'),
+    'writing': ('codex-luna', 'codex'),
 })
 
 FREE_CANDIDATE_BACKENDS_BY_LANE = MappingProxyType({
